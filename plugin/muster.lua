@@ -14,7 +14,8 @@ end
 vim.g.loaded_muster = true
 
 vim.api.nvim_create_user_command("Muster", function()
-	require("muster.overlay").open()
+	local bufnr = vim.api.nvim_get_current_buf()
+	require("muster.overlay").open(bufnr)
 end, { desc = "muster: show tool status for this buffer and everything else" })
 
 vim.api.nvim_create_autocmd("VimEnter", {

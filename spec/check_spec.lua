@@ -294,6 +294,20 @@ describe("check.run accounting", function()
 		end)
 	end)
 
+	it("skips an empty identity instead of creating a blank row", function()
+		local empty = fake("a", {
+			identity = function()
+				return ""
+			end,
+		})
+		with_adapters({ empty }, { a = { "nameless" } }, function()
+			local result = check.run()
+			assert.equals(0, #result.entries)
+			assert.equals(1, #result.skipped)
+			assert.is_truthy(result.skipped[1].reason:find("non-empty string", 1, true))
+		end)
+	end)
+
 	it("skips a non-string identity instead of letting the sort raise", function()
 		local numeric = fake("a", {
 			identity = function(e)

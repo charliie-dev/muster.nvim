@@ -124,7 +124,7 @@ end
 ---@param id string
 ---@param value any
 ---@return muster.Probe
-local function validated(id, value)
+function M.validate_probe(id, value)
 	local function invalid(why)
 		return {
 			status = "broken",
@@ -172,6 +172,8 @@ local function probe_entries(result, id, adapter, entries, bufnr, seen)
 			-- and into the final sort, where comparing it raises OUTSIDE any
 			-- per-adapter guard and destroys every adapter's results.
 			named, name = false, ("identity() returned a %s, expected a string"):format(type(name))
+		elseif named and name == "" then
+			named, name = false, "identity() returned an empty string, expected a non-empty string"
 		end
 		if not named then
 			result.skipped[#result.skipped + 1] =
@@ -195,7 +197,7 @@ local function probe_entries(result, id, adapter, entries, bufnr, seen)
 					adapter = id,
 					name = name,
 					declared = true,
-					probe = ok and validated(id, probe)
+					probe = ok and M.validate_probe(id, probe)
 						or { status = "broken", reason = ("probe raised: %s"):format(tostring(probe)) },
 					advice = {},
 				}
