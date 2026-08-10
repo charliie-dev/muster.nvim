@@ -19,20 +19,33 @@ end
 ---would otherwise hang the caller, and several do (go-debug-adapter only exits
 ---on EOF). Both streams are captured because tools disagree about where a
 ---version belongs.
----@param cmd string[]
----@param opts? { timeout_ms?: integer }
+---@param result vim.SystemCompleted
 ---@return { code: integer, output: string }
-function M.spawn(cmd, opts)
-	opts = opts or {}
-	local result = vim.system(cmd, {
-		stdin = false,
-		text = true,
-		timeout = opts.timeout_ms or 5000,
-	}):wait()
+local function capture(result)
 	return {
 		code = result.code,
 		output = (result.stdout or "") .. "\n" .. (result.stderr or ""),
 	}
+end
+
+---@param cmd string[]
+---@param opts? { timeout_ms?: integer }
+---@param callback? fun(result: { code: integer, output: string })
+---@return { code: integer, output: string }|nil
+function M.spawn(cmd, opts, callback)
+	opts = opts or {}
+	local system_opts = {
+		stdin = false,
+		text = true,
+		timeout = opts.timeout_ms or 5000,
+	}
+	if callback then
+		vim.system(cmd, system_opts, function(result)
+			callback(capture(result))
+		end)
+		return nil
+	end
+	return capture(vim.system(cmd, system_opts):wait())
 end
 
 return M
