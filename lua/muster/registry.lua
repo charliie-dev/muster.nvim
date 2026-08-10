@@ -8,7 +8,13 @@ local M = {}
 ---@type table<string, muster.Adapter>
 local adapters = {}
 
-local BUILTIN = { "lsp", "conform", "lint", "dap", "none_ls" }
+M.BUILTIN = { "lsp", "conform", "lint", "dap", "none_ls" }
+
+---@param id string
+---@return boolean
+function M.is_builtin(id)
+	return vim.tbl_contains(M.BUILTIN, id)
+end
 
 ---@param adapter muster.Adapter
 local function validate(adapter)
@@ -47,12 +53,26 @@ end
 
 ---Load the built-in adapters once. Kept lazy so `plugin/muster.lua` can stay
 ---free of requires: nothing here runs until the first check.
+---@return table<string, string> failures @Adapter id -> the load error.
 function M.load_builtins()
-	for _, id in ipairs(BUILTIN) do
+	local failures = {}
+	for _, id in ipairs(M.BUILTIN) do
 		if not adapters[id] then
-			M.register(require("muster.adapters." .. id))
+			-- Per id, not all-or-nothing: one broken module must not stop the
+			-- other four from registering, and the caller needs to know which
+			-- ones are missing rather than blaming every declared list.
+			local ok, adapter = pcall(require, "muster.adapters." .. id)
+			if not ok then
+				failures[id] = tostring(adapter)
+			else
+				local registered, err = pcall(M.register, adapter)
+				if not registered then
+					failures[id] = tostring(err)
+				end
+			end
 		end
 	end
+	return failures
 end
 
 ---Test seam: drop everything. Specs register fakes against a clean registry.

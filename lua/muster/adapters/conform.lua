@@ -95,7 +95,7 @@ function M.is_lua_format(name, bufnr)
 	if not mod_ok then
 		-- A module that exists but raises on load is a broken config; one that
 		-- simply is not there is not. `require` reports both, so distinguish.
-		local missing = tostring(mod):find("module '.*' not found", 1, false)
+		local missing = tostring(mod):find("module '" .. vim.pesc("conform.formatters." .. name) .. "' not found")
 		return false, (not missing) and tostring(mod) or nil
 	end
 	return type(mod) == "table" and type(mod.format) == "function"

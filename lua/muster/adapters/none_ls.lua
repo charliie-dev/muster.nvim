@@ -60,14 +60,20 @@ function M.probe(entry, _bufnr)
 				-- and stamping it over a `found` would tell the user a tool that
 				-- IS on $PATH is not.
 				local resolved = probe.resolve(command)
-				if resolved.status == "broken" then
-					return resolved
+				if resolved.status ~= "missing" then
+					-- The command may well be on $PATH; can_run() failed for some
+					-- other reason of the source's own. Calling that "not on
+					-- $PATH" would be a plain lie, so the verdict is reported as
+					-- what it is: the source says it cannot run.
+					return probe.broken(
+						("the source's own can_run() reports it cannot run (command %q resolved to %s)"):format(
+							command,
+							resolved.path or resolved.status
+						)
+					)
 				end
-				return {
-					status = "missing",
-					binary = resolved.binary,
-					reason = "the source's own can_run() reports it cannot run",
-				}
+				resolved.reason = "the source's own can_run() reports it cannot run"
+				return resolved
 			end
 			return probe.broken("can_run() reports the source cannot run, and it declares no command")
 		end

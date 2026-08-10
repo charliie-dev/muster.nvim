@@ -22,7 +22,9 @@ local LABEL = {
 	missing = "not on $PATH",
 	unknown = "unrecognised name",
 	broken = "config error",
-	unverifiable = "could not be verified from this buffer",
+	-- Not "from this buffer": most reasons here are not buffer-dependent, and
+	-- naming a cause muster does not know sends the user to try another buffer.
+	unverifiable = "could not be verified",
 }
 
 ---@param result muster.Result
@@ -33,7 +35,11 @@ function M.lines(result)
 		local status = entry.probe and entry.probe.status
 		if REPORTED[status] then
 			local bucket = by_status[status] or {}
-			bucket[#bucket + 1] = ("%s (%s)"):format(entry.name, entry.adapter)
+			-- The reason carries the truth: conform's verbatim message tells the
+			-- user whether a name is a typo or a malformed config, and dropping
+			-- it defeats the whole reason muster accepts that conflation.
+			local reason = entry.probe and entry.probe.reason
+			bucket[#bucket + 1] = ("%s (%s)%s"):format(entry.name, entry.adapter, reason and (" — " .. reason) or "")
 			by_status[status] = bucket
 		end
 	end
@@ -97,6 +103,17 @@ function M.emit(result)
 		problems = problems + (counts[status] or 0)
 	end
 
+	-- Severity follows the worst skip: an adapter that crashed and a plugin
+	-- that has not loaded yet must not read identically at the same level.
+	local level = vim.log.levels.WARN
+	local unchecked = 0
+	for _, skip in ipairs(result.skipped) do
+		unchecked = unchecked + (skip.count or 0)
+		if skip.severity == "error" then
+			level = vim.log.levels.ERROR
+		end
+	end
+
 	local header
 	if problems == 1 then
 		header = "muster: 1 tool needs attention"
@@ -107,8 +124,11 @@ function M.emit(result)
 		-- a count of problems.
 		header = "muster: some tools were not checked"
 	end
+	if unchecked > 0 then
+		header = ("%s (%d unchecked)"):format(header, unchecked)
+	end
 
-	vim.notify(header .. "\n" .. table.concat(lines, "\n"), vim.log.levels.WARN, { title = "muster" })
+	vim.notify(header .. "\n" .. table.concat(lines, "\n"), level, { title = "muster" })
 	return true
 end
 

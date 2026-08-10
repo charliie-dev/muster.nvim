@@ -10,6 +10,7 @@ local registry = require("muster.registry")
 local M = {}
 
 local STATUSES = { found = true, missing = true, unverifiable = true, unknown = true, broken = true }
+local SOURCES = { mason = true, nix = true, mise = true, brew = true, system = true, unknown = true }
 
 ---Mason puts its bin directory on $PATH inside `mason.setup()` and nowhere else.
 ---Probing before that reports every Mason-provided tool as missing — the exact
@@ -62,6 +63,7 @@ end
 ---@param adapter muster.Adapter
 ---@return any[]|nil entries
 ---@return string|nil skip_reason
+---@return string|nil severity
 local function entries_for(id, adapter)
 	local declared = config.list(id)
 	if declared then
@@ -121,11 +123,22 @@ local function validated(id, value)
 	-- The requiredness rules are enforced HERE or nowhere: a third-party probe
 	-- is exactly the path they drift through, and a `found` with no path renders
 	-- as a green tick for something that was never verified.
+	local function present(v)
+		return type(v) == "string" and v ~= ""
+	end
 	if value.status == "found" then
-		if type(value.path) ~= "string" or type(value.source) ~= "string" or type(value.binary) ~= "string" then
+		if not (present(value.binary) and present(value.path) and present(value.source)) then
 			return invalid("found without binary, path and source")
 		end
-	elseif value.status ~= "missing" and type(value.reason) ~= "string" then
+		if not SOURCES[value.source] then
+			return invalid(("unrecognised source %q"):format(tostring(value.source)))
+		end
+	elseif value.status == "missing" then
+		-- `binary` is the Mason registry key the hand-off will need.
+		if not present(value.binary) then
+			return invalid("missing without a binary")
+		end
+	elseif not present(value.reason) then
 		return invalid(("%s without a reason"):format(value.status))
 	end
 	return value
@@ -185,34 +198,43 @@ function M.run(bufnr)
 	---@type muster.Result
 	local result = { entries = {}, skipped = {}, bufnr = bufnr, notes = {} }
 
-	local loaded_ok, load_err = pcall(registry.load_builtins)
-	if not loaded_ok then
+	local loaded_ok, failures = pcall(registry.load_builtins)
+	if loaded_ok and type(failures) == "table" then
+		for id, err in pairs(failures) do
+			-- Only the adapters that actually failed. Blaming every declared
+			-- list would assert that fully-probed tools went unchecked.
+			local list = config.list(id)
+			result.skipped[#result.skipped + 1] = {
+				adapter = id,
+				count = type(list) == "table" and #list or 0,
+				severity = "error",
+				reason = ("muster could not load its %q adapter: %s"):format(id, err),
+			}
+		end
+	elseif not loaded_ok then
 		-- A note alone would be silent: notes never notify, and with no adapters
 		-- registered there are no entries and no skips either, so a total
 		-- failure to load would produce a completely empty, clean-looking
 		-- report. Every declared list is accounted for instead.
-		local current = config.get() or {}
-		local reported = false
-		for key in pairs(current) do
-			local list = config.list(key)
-			if type(list) == "table" then
-				reported = true
-				result.skipped[#result.skipped + 1] = {
-					adapter = key,
-					count = #list,
-					severity = "error",
-					reason = ("muster could not load its built-in adapters: %s"):format(load_err),
-				}
-			end
-		end
-		if not reported then
-			result.skipped[#result.skipped + 1] = {
-				adapter = "muster",
-				count = 0,
-				severity = "error",
-				reason = ("muster could not load its built-in adapters: %s"):format(load_err),
-			}
-		end
+		result.skipped[#result.skipped + 1] = {
+			adapter = "muster",
+			count = 0,
+			severity = "error",
+			reason = ("muster could not load its built-in adapters: %s"):format(tostring(failures)),
+		}
+	end
+
+	-- A rejected setup() must be visible on every surface, not only in the
+	-- one-shot notification at setup time: `check()` is public API, and there a
+	-- discarded config would otherwise be indistinguishable from an empty one.
+	local config_err = config.error()
+	if config_err then
+		result.skipped[#result.skipped + 1] = {
+			adapter = "muster",
+			count = 0,
+			severity = "error",
+			reason = ("your setup() call was rejected, so only defaults are in effect: %s"):format(config_err),
+		}
 	end
 	mason_notes(result.notes)
 
@@ -221,14 +243,14 @@ function M.run(bufnr)
 		-- One bad adapter must cost one adapter's worth of results, not all of
 		-- them: a raise here would otherwise destroy the whole report.
 		local ok, err = pcall(function()
-			local entries, skip_reason = entries_for(id, adapter)
+			local entries, skip_reason, severity = entries_for(id, adapter)
 			if not entries then
 				if skip_reason then
 					local list = config.list(id)
 					result.skipped[#result.skipped + 1] = {
 						adapter = id,
 						count = type(list) == "table" and #list or 0,
-						severity = "warn",
+						severity = severity or "warn",
 						reason = skip_reason,
 					}
 				end

@@ -56,7 +56,9 @@ local function unknown_keys()
 	local options = require("muster.config").OPTIONS
 	local unknown = {}
 	for key in pairs(config) do
-		if not options[key] and not registry.get(key) then
+		-- A builtin id whose module failed to load is unregistered but is NOT a
+		-- typo: saying so would send the user to fix a line that is correct.
+		if not options[key] and not registry.get(key) and not registry.is_builtin(key) then
 			unknown[#unknown + 1] = key
 		end
 	end
@@ -73,7 +75,7 @@ function M.check()
 	if setup_err then
 		-- Distinct from "never called": telling a user who did call setup that
 		-- they did not sends them to fix the one thing that is not wrong.
-		vim.health.error(("setup() was called but rejected, so no tools are checked: %s"):format(setup_err))
+		vim.health.error(("setup() was called but rejected, so only defaults are in effect: %s"):format(setup_err))
 	elseif not config then
 		vim.health.info("setup() has not been called; the automatic check does not run")
 		return
@@ -89,6 +91,14 @@ function M.check()
 
 	for _, key in ipairs(unknown_keys()) do
 		vim.health.error(("setup key %q matches no registered adapter"):format(key))
+	end
+
+	if config.install and config.install ~= false then
+		vim.health.warn(
+			("install = %q is configured, but the Mason hand-off is not implemented yet; "):format(
+				tostring(config.install)
+			) .. "missing tools are reported but nothing is installed."
+		)
 	end
 
 	local result = require("muster.check").run()
@@ -113,7 +123,11 @@ function M.check()
 			declared = declared + #list
 		end
 	end
-	if declared == 0 then
+	-- Derived mode (none-ls) has no config key, so counting the config alone
+	-- would report "no tools declared" while entries sit right below.
+	declared = math.max(declared, #result.entries)
+
+	if declared == 0 and #result.entries == 0 and #result.skipped == 0 then
 		vim.health.info("no tools declared")
 		return
 	end

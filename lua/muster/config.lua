@@ -62,7 +62,7 @@ function M.setup(opts)
 		setup_error = tostring(err)
 		current = vim.deepcopy(defaults)
 		vim.notify(
-			("muster: configuration rejected, no tools will be checked: %s"):format(err),
+			("muster: your configuration was rejected, so only defaults are in effect: %s"):format(err),
 			vim.log.levels.ERROR,
 			{ title = "muster" }
 		)
