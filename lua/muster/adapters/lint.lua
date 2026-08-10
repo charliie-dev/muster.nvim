@@ -13,9 +13,10 @@ local M = {
 	id = "lint",
 }
 
----@return boolean
+---@return boolean loaded
+---@return string|nil reason
 function M.available()
-	return pcall(require, "lint")
+	return require("muster.host").status("lint", "lua/lint.lua")
 end
 
 ---@param entry any
@@ -55,6 +56,12 @@ function M.probe(entry, _bufnr)
 	if type(linter.cmd) == "function" then
 		return probe.unverifiable("cmd is a function: the linter resolves it per run")
 	end
+	if type(linter.cmd) ~= "string" or linter.cmd == "" then
+		-- A structurally invalid entry is a config error, not something we
+		-- merely could not verify: routing it to `unverifiable` would file a
+		-- broken linter under "nothing to worry about".
+		return probe.broken(("linter table has no usable `cmd` (found %s)"):format(type(linter.cmd)))
+	end
 	return probe.resolve(linter.cmd)
 end
 
@@ -62,13 +69,17 @@ end
 ---rather than indexing `linters_by_ft` directly, because nvim-lint resolves
 ---dotted compound filetypes there and a plain index misses those buffers.
 ---@param bufnr integer
----@return string[]
+---@return string[] entries
+---@return string|nil err @A failed query must not render as "nothing configured".
 function M.live(bufnr)
 	local ok, names = pcall(function()
 		local ft = vim.bo[bufnr].filetype
 		return require("lint")._resolve_linter_by_ft(ft)
 	end)
-	return ok and names or {}
+	if not ok then
+		return {}, tostring(names)
+	end
+	return type(names) == "table" and names or {}, nil
 end
 
 return M

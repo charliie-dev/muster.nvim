@@ -19,6 +19,12 @@ local M = {}
 ---@param opts? table
 function M.setup(opts)
 	require("muster.config").setup(opts)
+	-- Trigger the automatic check from here too. `VimEnter` alone is not enough:
+	-- `event = "VeryLazy"` and every cmd/ft/keys lazy spec call setup() strictly
+	-- after VimEnter, and the autocmd is `once`, so the check would never run.
+	if vim.v.vim_did_enter == 1 then
+		require("muster.runner").start()
+	end
 end
 
 ---Register a third-party adapter. Declared in `setup()` under its `id`, exactly

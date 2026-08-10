@@ -110,14 +110,21 @@ end
 
 ---Resolve a binary name to the full location record a `found` probe needs.
 ---@param name string
----@return { path: string, realpath: string|nil, source: muster.Source }|nil
+---@return { path: string, realpath: string|nil, source: muster.Source, reason: string|nil }|nil
 function M.locate(name)
 	local path = require("muster.env").executable(name)
 	if not path then
 		return nil
 	end
-	local realpath = vim.uv.fs_realpath(path)
-	return { path = path, realpath = realpath, source = M.classify(path, realpath) }
+	-- Keep the errno: `source = "unknown"` with no explanation is far less
+	-- actionable than one that says ELOOP or EACCES.
+	local realpath, err = vim.uv.fs_realpath(path)
+	return {
+		path = path,
+		realpath = realpath,
+		source = M.classify(path, realpath),
+		reason = (not realpath) and ("could not resolve symlinks: " .. tostring(err)) or nil,
+	}
 end
 
 return M

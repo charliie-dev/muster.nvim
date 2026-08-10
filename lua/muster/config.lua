@@ -22,6 +22,13 @@ local defaults = {
 ---@type muster.Config|nil
 local current = nil
 
+---Set when a `setup()` call was rejected. Distinguishing "never called" from
+---"called and rejected" matters: without it the health check tells a user who
+---did call setup that they did not, sending them to fix the one thing that is
+---not wrong.
+---@type string|nil
+local setup_error = nil
+
 ---@param opts table
 local function validate(opts)
 	vim.validate("opts", opts, "table")
@@ -40,11 +47,21 @@ end
 function M.setup(opts)
 	opts = opts or {}
 	local ok, err = pcall(validate, opts)
-	if not ok then
-		vim.notify(("muster: invalid configuration: %s"):format(err), vim.log.levels.ERROR)
-		return
+	if ok then
+		setup_error = nil
+		current = vim.tbl_extend("force", vim.deepcopy(defaults), opts)
+	else
+		-- Keep a usable config rather than leaving `current` nil: a nil config
+		-- means "setup was never called", which is a different and misleading
+		-- statement. The rejection is recorded and surfaced instead.
+		setup_error = tostring(err)
+		current = vim.deepcopy(defaults)
+		vim.notify(
+			("muster: configuration rejected, no tools will be checked: %s"):format(err),
+			vim.log.levels.ERROR,
+			{ title = "muster" }
+		)
 	end
-	current = vim.tbl_extend("force", vim.deepcopy(defaults), opts)
 end
 
 ---nil until `setup()` runs. The automatic check reads this to decide whether to
@@ -53,6 +70,11 @@ end
 ---@return muster.Config|nil
 function M.get()
 	return current
+end
+
+---@return string|nil
+function M.error()
+	return setup_error
 end
 
 ---The declared list for one adapter, or nil when the key was absent.
@@ -68,6 +90,7 @@ end
 ---Test seam.
 function M.reset()
 	current = nil
+	setup_error = nil
 end
 
 return M

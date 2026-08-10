@@ -12,9 +12,10 @@ local M = {
 	id = "dap",
 }
 
----@return boolean
+---@return boolean loaded
+---@return string|nil reason
 function M.available()
-	return pcall(require, "dap")
+	return require("muster.host").status("dap", "lua/dap.lua")
 end
 
 ---@param entry any
@@ -65,7 +66,8 @@ end
 ---through `dap.providers.configs` (launch.json) are not in the static table, so
 ---this undercounts; documented rather than worked around.
 ---@param bufnr integer
----@return string[]
+---@return string[] entries
+---@return string|nil err @A failed query must not render as "nothing configured".
 function M.live(bufnr)
 	local ok, types = pcall(function()
 		local ft = vim.bo[bufnr].filetype
@@ -80,7 +82,10 @@ function M.live(bufnr)
 		end
 		return out
 	end)
-	return ok and types or {}
+	if not ok then
+		return {}, tostring(types)
+	end
+	return type(types) == "table" and types or {}, nil
 end
 
 return M

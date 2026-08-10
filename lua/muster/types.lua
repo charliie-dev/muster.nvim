@@ -9,7 +9,8 @@
 ---| '"missing"'      # string command, not on $PATH
 ---| '"unverifiable"' # function-form command, or a predicate needing a real buffer
 ---| '"unknown"'      # the subsystem does not recognise this name
----| '"broken"'       # the subsystem's own lookup raised
+---| '"broken"'       # the subsystem's own lookup failed: it raised, or it
+---                    # returned a structurally invalid config
 
 ---Where a found executable came from. `unknown` means `found` but `fs_realpath`
 ---failed — never the fallback for an unrecognised prefix, which is `system`.
@@ -26,12 +27,16 @@
 ---One subsystem, adapted to a single interface.
 ---@class muster.Adapter
 ---@field id string
----@field available fun(): boolean Is the host plugin loaded?
+---@field available fun(): boolean, string|nil Is the host plugin loaded? The
+---  second return is why not — "installed but not loaded yet" and "not
+---  installed" are different things and must not read alike.
 ---@field identity fun(entry: any): string Stable per-adapter report/dedupe key.
 ---@field probe fun(entry: any, bufnr: integer): muster.Probe
----@field live? fun(bufnr: integer): any[] Entries live for this buffer, in the
----  shape this adapter's own `identity`/`probe` accept. Overlay only; omitting it
----  is a degradation, not an error.
+---@field live? fun(bufnr: integer): any[], string|nil Entries live for this
+---  buffer, in the shape this adapter's own `identity`/`probe` accept, plus an
+---  error when the query itself failed. Omitting `live` is a stated degradation;
+---  a `live` that FAILED is not the same thing and must not render alike.
+---  Overlay only.
 
 ---@class muster.Advice
 ---@field provider '"mason"'|'"nix"'|'"mise"'

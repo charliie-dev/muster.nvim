@@ -44,6 +44,11 @@ function M.resolve(command)
 		return M.unverifiable("no command to probe")
 	end
 	local binary = vim.fs.basename(command)
+	if binary == "" then
+		-- "/usr/bin/git/" or "/": a degenerate registry key, and nothing a
+		-- $PATH lookup could ever satisfy.
+		return M.broken(("command %q has no executable name"):format(command))
+	end
 	local located = source.locate(command)
 	if not located then
 		return { status = "missing", binary = binary }
@@ -54,6 +59,7 @@ function M.resolve(command)
 		path = located.path,
 		realpath = located.realpath,
 		source = located.source,
+		reason = located.reason,
 	}
 end
 

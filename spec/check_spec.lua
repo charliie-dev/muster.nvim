@@ -11,13 +11,17 @@ local function fake(id, opts)
 	return {
 		id = id,
 		available = function()
-			return opts.available ~= false
+			if opts.available == false then
+				return false, opts.unavailable_reason or "host plugin not loaded"
+			end
+			return true
 		end,
 		identity = opts.identity or tostring,
 		probe = opts.probe or function(entry)
 			return { status = "missing", binary = tostring(entry) }
 		end,
 		registered = opts.registered,
+		live = opts.live,
 	}
 end
 
@@ -103,7 +107,7 @@ describe("check.run", function()
 	it("treats a loaded-but-empty none_ls as a skip, not an all-clear", function()
 		local none_ls = fake("none_ls", {
 			registered = function()
-				return {}
+				return true, {}
 			end,
 		})
 		with_adapters({ none_ls }, {}, function()
@@ -120,7 +124,7 @@ describe("check.run", function()
 		local none_ls = fake("none_ls", {
 			available = false,
 			registered = function()
-				return {}
+				return true, {}
 			end,
 		})
 		with_adapters({ none_ls }, {}, function()
@@ -133,7 +137,7 @@ describe("check.run", function()
 	it("falls back to none_ls's own registry and still counts as declared", function()
 		local none_ls = fake("none_ls", {
 			registered = function()
-				return { "src_a", "src_b" }
+				return true, { "src_a", "src_b" }
 			end,
 		})
 		with_adapters({ none_ls }, {}, function()
@@ -169,6 +173,79 @@ describe("check.tally", function()
 			assert.equals(2, counts.missing)
 			assert.equals(0, counts.found)
 			assert.equals(0, counts.broken)
+		end)
+	end)
+end)
+
+describe("check.run resilience", function()
+	it("replaces an invalid probe with broken rather than crashing a presenter", function()
+		local bad = fake("a", {
+			probe = function()
+				return { reason = "no status field" }
+			end,
+		})
+		with_adapters({ bad }, { a = { "one" } }, function()
+			local result = check.run()
+			assert.equals("broken", result.entries[1].probe.status)
+			assert.is_truthy(result.entries[1].probe.reason:find("invalid probe", 1, true))
+			-- tally must survive it too: it runs inside a scheduled callback.
+			assert.equals(1, check.tally(result).broken)
+		end)
+	end)
+
+	it("treats an unrecognised status as broken instead of dropping it", function()
+		local odd = fake("a", {
+			probe = function()
+				return { status = "absent-ish", reason = "boom" }
+			end,
+		})
+		with_adapters({ odd }, { a = { "one" } }, function()
+			assert.equals("broken", check.run().entries[1].probe.status)
+		end)
+	end)
+
+	it("contains a raising adapter to that adapter alone", function()
+		local boom = fake("boom", {
+			available = false,
+		})
+		boom.available = function()
+			error("adapter exploded")
+		end
+		with_adapters({ boom, fake("ok_one") }, { boom = { "x" }, ok_one = { "y" } }, function()
+			local result = check.run()
+			assert.equals(1, #result.entries, "the healthy adapter's results must survive")
+			assert.equals("ok_one", result.entries[1].adapter)
+			assert.equals(1, #result.skipped)
+			assert.is_truthy(result.skipped[1].reason:find("exploded", 1, true))
+		end)
+	end)
+
+	it("carries the adapter's own reason for being unavailable", function()
+		local absent = fake("a", { available = false, unavailable_reason = "host plugin is not installed" })
+		with_adapters({ absent }, { a = { "one" } }, function()
+			assert.equals("host plugin is not installed", check.run().skipped[1].reason)
+		end)
+	end)
+
+	it("reports an empty declared list rather than passing it as all clear", function()
+		with_adapters({ fake("a") }, { a = {} }, function()
+			local result = check.run()
+			assert.equals(0, #result.entries)
+			assert.equals(1, #result.skipped)
+			assert.is_truthy(result.skipped[1].reason:find("empty", 1, true))
+		end)
+	end)
+
+	it("says muster could not read none-ls rather than blaming the user's config", function()
+		local none_ls = fake("none_ls", {
+			registered = function()
+				return false, "attempt to index a nil value (field 'state')"
+			end,
+		})
+		with_adapters({ none_ls }, {}, function()
+			local reason = check.run().skipped[1].reason
+			assert.is_truthy(reason:find("could not read", 1, true))
+			assert.is_truthy(reason:find("nil value", 1, true))
 		end)
 	end)
 end)

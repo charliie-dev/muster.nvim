@@ -13,9 +13,10 @@ local M = {
 	id = "none_ls",
 }
 
----@return boolean
+---@return boolean loaded
+---@return string|nil reason
 function M.available()
-	return pcall(require, "null-ls")
+	return require("muster.host").status("null-ls", "lua/null-ls/init.lua")
 end
 
 ---@param entry any
@@ -51,11 +52,15 @@ function M.probe(entry, _bufnr)
 			return probe.broken(runnable --[[@as string]])
 		end
 		if not runnable then
-			return {
-				status = "missing",
-				binary = type(command) == "string" and command or nil,
-				reason = "the source's own can_run() reports it cannot run",
-			}
+			if type(command) == "string" and command ~= "" then
+				-- Route through resolve so `binary` is a basename, as the
+				-- registry key contract requires, rather than a raw path.
+				local p = probe.resolve(command)
+				p.status = "missing"
+				p.reason = "the source's own can_run() reports it cannot run"
+				return p
+			end
+			return probe.broken("can_run() reports the source cannot run, and it declares no command")
 		end
 		if type(command) ~= "string" or command == "" then
 			-- Runs in-process; there is no external tool to be missing.
@@ -76,22 +81,30 @@ end
 ---"available" means registered-and-matching; it does NOT check that the command
 ---exists, so every result still goes through `probe`.
 ---@param bufnr integer
----@return any[]
+---@return any[] entries
+---@return string|nil err @A failed query must not render as "nothing configured".
 function M.live(bufnr)
 	local ok, sources = pcall(function()
 		local ft = vim.bo[bufnr].filetype
 		return require("null-ls.sources").get_available(ft)
 	end)
-	return ok and sources or {}
+	if not ok then
+		return {}, tostring(sources)
+	end
+	return type(sources) == "table" and sources or {}, nil
 end
 
 ---Every registered source, for the derived mode where the user gave no list.
----@return any[]
+---
+---Returns the failure distinctly: a swallowed error here would be reported as
+---"none-ls has no registered sources", sending the user to debug a config that
+---is fine while muster's own read is what broke.
+---@return boolean ok
+---@return any[]|string sources_or_error
 function M.registered()
-	local ok, sources = pcall(function()
+	return pcall(function()
 		return require("null-ls.sources").get_all()
 	end)
-	return ok and sources or {}
 end
 
 return M

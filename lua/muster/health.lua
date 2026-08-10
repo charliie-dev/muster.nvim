@@ -57,10 +57,24 @@ end
 function M.check()
 	vim.health.start("muster")
 
-	local config = require("muster.config").get()
-	if not config then
+	local config_mod = require("muster.config")
+	local config = config_mod.get()
+	local setup_err = config_mod.error()
+	if setup_err then
+		-- Distinct from "never called": telling a user who did call setup that
+		-- they did not sends them to fix the one thing that is not wrong.
+		vim.health.error(("setup() was called but rejected, so no tools are checked: %s"):format(setup_err))
+	elseif not config then
 		vim.health.info("setup() has not been called; the automatic check does not run")
 		return
+	end
+
+	if not require("muster.runner").has_run() then
+		vim.health.warn(
+			"the automatic startup check has not run this session. "
+				.. "If muster is lazy-loaded, make sure setup() is called (an on-demand :checkhealth "
+				.. "does not substitute for it)."
+		)
 	end
 
 	for _, key in ipairs(unknown_keys()) do
@@ -72,7 +86,10 @@ function M.check()
 		vim.health.warn(note)
 	end
 	for _, skip in ipairs(result.skipped) do
-		vim.health.info(("%s: %s (%d entries)"):format(skip.adapter, skip.reason, skip.count))
+		-- A skip that hides declared entries is a warning, not trivia: those
+		-- tools went unchecked.
+		local level = skip.count > 0 and "warn" or "info"
+		vim.health[level](("%s: %s (%d entries unchecked)"):format(skip.adapter, skip.reason, skip.count))
 	end
 
 	if #result.entries == 0 then

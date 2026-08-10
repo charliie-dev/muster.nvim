@@ -10,12 +10,19 @@ local M = {}
 
 ---Statuses the startup notification reports on. `found` is deliberately absent:
 ---`:checkhealth muster` and `:Muster` show everything.
-local REPORTED = { missing = true, unknown = true, broken = true }
+---
+---`unverifiable` IS included, in its own section. "We could not tell" must never
+---render identically to "it is fine" — that composition is the exact failure
+---this plugin exists to prevent.
+local REPORTED = { missing = true, unknown = true, broken = true, unverifiable = true }
+
+local PROBLEM = { missing = true, unknown = true, broken = true }
 
 local LABEL = {
 	missing = "not on $PATH",
 	unknown = "unrecognised name",
 	broken = "config error",
+	unverifiable = "could not be verified from this buffer",
 }
 
 ---@param result muster.Result
@@ -23,15 +30,16 @@ local LABEL = {
 function M.lines(result)
 	local by_status = {}
 	for _, entry in ipairs(result.entries) do
-		if REPORTED[entry.probe.status] then
-			local bucket = by_status[entry.probe.status] or {}
+		local status = entry.probe and entry.probe.status
+		if REPORTED[status] then
+			local bucket = by_status[status] or {}
 			bucket[#bucket + 1] = ("%s (%s)"):format(entry.name, entry.adapter)
-			by_status[entry.probe.status] = bucket
+			by_status[status] = bucket
 		end
 	end
 
 	local lines = {}
-	for _, status in ipairs({ "missing", "unknown", "broken" }) do
+	for _, status in ipairs({ "missing", "unknown", "broken", "unverifiable" }) do
 		local bucket = by_status[status]
 		if bucket then
 			lines[#lines + 1] = ("  %s: %s"):format(LABEL[status], table.concat(bucket, ", "))
@@ -46,6 +54,25 @@ function M.lines(result)
 	return lines
 end
 
+---Does this result contain anything the user must act on?
+---
+---Notes alone do not qualify. Mason's `PATH = "prepend"` is its default, so
+---notifying on a note would mean a warning popup on every startup for every
+---Mason user — and would break the "silent when nothing is wrong" promise that
+---justifies defaulting the notification to on. Notes still appear in
+---`:checkhealth muster`.
+---@param result muster.Result
+---@return boolean
+function M.has_problems(result)
+	for _, entry in ipairs(result.entries) do
+		local status = entry.probe and entry.probe.status
+		if REPORTED[status] then
+			return true
+		end
+	end
+	return #result.skipped > 0
+end
+
 ---Emit the one report for this check. Returns whether anything was shown, so a
 ---caller (and a spec) can tell silence from suppression.
 ---@param result muster.Result
@@ -55,6 +82,9 @@ function M.emit(result)
 	if not config or not config.notify_on_startup then
 		return false
 	end
+	if not M.has_problems(result) then
+		return false
+	end
 
 	local lines = M.lines(result)
 	if #lines == 0 then
@@ -62,9 +92,19 @@ function M.emit(result)
 	end
 
 	local counts = check.tally(result)
-	local problems = counts.missing + counts.unknown + counts.broken
-	local header = problems > 0 and ("muster: %d tool%s need attention"):format(problems, problems == 1 and "" or "s")
-		or "muster"
+	local problems = 0
+	for status in pairs(PROBLEM) do
+		problems = problems + (counts[status] or 0)
+	end
+
+	local header
+	if problems == 1 then
+		header = "muster: 1 tool needs attention"
+	elseif problems > 1 then
+		header = ("muster: %d tools need attention"):format(problems)
+	else
+		header = "muster"
+	end
 
 	vim.notify(header .. "\n" .. table.concat(lines, "\n"), vim.log.levels.WARN, { title = "muster" })
 	return true
