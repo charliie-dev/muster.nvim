@@ -81,6 +81,9 @@ function M.probe(entry, _bufnr)
 				)
 			)
 		end
+		if type(command) == "function" then
+			return probe.unverifiable("can_run() passed; command is a function the source resolves per run")
+		end
 		if type(command) ~= "string" or command == "" then
 			-- Runs in-process; there is no external tool to be missing.
 			return probe.unverifiable("can_run() passed; source has no external command")

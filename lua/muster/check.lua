@@ -303,7 +303,11 @@ function M.run(bufnr)
 	-- a clean Result indistinguishable from a passing one.
 	for key in pairs(config.get() or {}) do
 		local list = config.list(key)
-		if type(list) == "table" and not registry.get(key) then
+		-- A declared BUILTIN key is never a typo, and its absence from the
+		-- registry is already reported above with the real load error. Without
+		-- this the adapter is skipped twice, its unchecked count is doubled, and
+		-- the second line calls a correct setup key a typo.
+		if type(list) == "table" and not registry.get(key) and not registry.is_builtin(key) then
 			result.skipped[#result.skipped + 1] = {
 				adapter = key,
 				count = #list,

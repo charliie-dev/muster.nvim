@@ -70,13 +70,17 @@ function M.check()
 	vim.health.start("muster")
 
 	local config_mod = require("muster.config")
-	local config = config_mod.get()
+	-- `or {}`: removing the early return for the no-setup case left every
+	-- statement below dereferencing a nil config, turning a green page over
+	-- missing tools into a traceback over the same missing tools.
+	local raw_config = config_mod.get()
+	local config = raw_config or {}
 	local setup_err = config_mod.error()
 	if setup_err then
 		-- Distinct from "never called": telling a user who did call setup that
 		-- they did not sends them to fix the one thing that is not wrong.
 		vim.health.error(("setup() was called but rejected, so only defaults are in effect: %s"):format(setup_err))
-	elseif not config then
+	elseif not raw_config then
 		-- Only the AUTOMATIC check is suppressed without setup(); an on-demand
 		-- health check was explicitly asked for, and returning here rendered a
 		-- green page over tools muster's own check() could see were missing.
