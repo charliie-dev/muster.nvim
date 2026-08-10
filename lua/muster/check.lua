@@ -94,10 +94,24 @@ local function entries_for(id, adapter)
 	if id == "none_ls" and type(adapter.registered) == "function" and adapter.available() then
 		local ok, sources = adapter.registered()
 		if not ok then
-			return nil, "none-ls is loaded but muster could not read its source registry: " .. tostring(sources)
+			-- muster's own read failed and the whole derived list went unread.
+			-- That is an error about muster, not a warning about the user's
+			-- config, and it must not read like "conform hasn't loaded yet".
+			return nil,
+				"none-ls is loaded but muster could not read its source registry: " .. tostring(sources),
+				"error"
 		end
-		if type(sources) ~= "table" or #sources == 0 then
-			return nil, "none-ls is loaded but has no registered sources"
+		if type(sources) ~= "table" then
+			-- Structurally wrong is not the same as empty: telling the user
+			-- they registered no sources sends them to audit a list that is fine.
+			return nil,
+				("none-ls's get_all() returned a %s, not a list of sources; muster cannot read it"):format(
+					type(sources)
+				),
+				"error"
+		end
+		if #sources == 0 then
+			return nil, "none-ls is loaded but has no registered sources", "warn"
 		end
 		return sources, nil
 	end
@@ -284,15 +298,36 @@ function M.run(bufnr)
 		end
 	end
 
+	-- A declared key with no adapter behind it is never visited by the loop
+	-- above, so without this it produces no entry, no skip and total silence --
+	-- a clean Result indistinguishable from a passing one.
+	for key in pairs(config.get() or {}) do
+		local list = config.list(key)
+		if type(list) == "table" and not registry.get(key) then
+			result.skipped[#result.skipped + 1] = {
+				adapter = key,
+				count = #list,
+				severity = "error",
+				reason = "no adapter is registered for this setup key "
+					.. "(a typo, or the plugin providing it has not registered yet)",
+			}
+		end
+	end
+
 	-- Every name reaching here is a validated string, but the sort is the one
 	-- statement outside the per-adapter guards, so it is protected too: a raise
 	-- here would discard the whole report.
-	pcall(table.sort, result.entries, function(a, b)
+	local sorted, sort_err = pcall(table.sort, result.entries, function(a, b)
 		if a.adapter ~= b.adapter then
 			return a.adapter < b.adapter
 		end
 		return a.name < b.name
 	end)
+	if not sorted then
+		-- Reaching here means the comparator saw data the validators were
+		-- supposed to make impossible; row order is cosmetic but the bug is not.
+		result.notes[#result.notes + 1] = ("muster could not sort its results: %s"):format(tostring(sort_err))
+	end
 	return result
 end
 

@@ -75,7 +75,11 @@ function M.probe(entry, _bufnr)
 				resolved.reason = "the source's own can_run() reports it cannot run"
 				return resolved
 			end
-			return probe.broken("can_run() reports the source cannot run, and it declares no command")
+			return probe.broken(
+				("can_run() reports the source cannot run; its command is a %s, so muster cannot resolve it"):format(
+					type(command)
+				)
+			)
 		end
 		if type(command) ~= "string" or command == "" then
 			-- Runs in-process; there is no external tool to be missing.

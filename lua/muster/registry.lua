@@ -53,21 +53,40 @@ end
 
 ---Load the built-in adapters once. Kept lazy so `plugin/muster.lua` can stay
 ---free of requires: nothing here runs until the first check.
+---@type table<string, string>
+local load_failures = {}
+
 ---@return table<string, string> failures @Adapter id -> the load error.
 function M.load_builtins()
-	local failures = {}
+	local failures = vim.deepcopy(load_failures)
 	for _, id in ipairs(M.BUILTIN) do
-		if not adapters[id] then
+		if adapters[id] and not adapters[id].__muster_builtin then
+			-- Someone else got here first. Silently yielding would mean every
+			-- verdict for this subsystem came from foreign code while muster's
+			-- own adapter never ran, and nothing said so.
+			failures[id] = (
+				"a third-party adapter is registered under this built-in id, "
+				.. "so muster's own %q adapter was not loaded"
+			):format(id)
+		elseif not adapters[id] then
 			-- Per id, not all-or-nothing: one broken module must not stop the
 			-- other four from registering, and the caller needs to know which
 			-- ones are missing rather than blaming every declared list.
 			local ok, adapter = pcall(require, "muster.adapters." .. id)
 			if not ok then
-				failures[id] = tostring(adapter)
+				-- Remember the ORIGINAL text. A second require of a module that
+				-- raised returns Lua's "loop or previous error" sentinel, which
+				-- names a require loop that does not exist and loses the cause.
+				failures[id] = load_failures[id] or tostring(adapter)
+				load_failures[id] = failures[id]
 			else
+				if type(adapter) == "table" then
+					adapter.__muster_builtin = true
+				end
 				local registered, err = pcall(M.register, adapter)
 				if not registered then
-					failures[id] = tostring(err)
+					failures[id] = load_failures[id] or tostring(err)
+					load_failures[id] = failures[id]
 				end
 			end
 		end
@@ -78,6 +97,7 @@ end
 ---Test seam: drop everything. Specs register fakes against a clean registry.
 function M.reset()
 	adapters = {}
+	load_failures = {}
 end
 
 return M

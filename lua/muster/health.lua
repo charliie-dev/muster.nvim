@@ -77,8 +77,10 @@ function M.check()
 		-- they did not sends them to fix the one thing that is not wrong.
 		vim.health.error(("setup() was called but rejected, so only defaults are in effect: %s"):format(setup_err))
 	elseif not config then
-		vim.health.info("setup() has not been called; the automatic check does not run")
-		return
+		-- Only the AUTOMATIC check is suppressed without setup(); an on-demand
+		-- health check was explicitly asked for, and returning here rendered a
+		-- green page over tools muster's own check() could see were missing.
+		vim.health.info("setup() has not been called, so the automatic startup check does not run")
 	end
 
 	if not require("muster.runner").has_run() then
@@ -123,9 +125,14 @@ function M.check()
 			declared = declared + #list
 		end
 	end
-	-- Derived mode (none-ls) has no config key, so counting the config alone
-	-- would report "no tools declared" while entries sit right below.
-	declared = math.max(declared, #result.entries)
+	-- Derived entries have no config key, so they are a SECOND population, not
+	-- an alternative one. `max` would hide declared-but-skipped tools: three
+	-- unchecked conform tools plus six derived sources must read as nine, not six.
+	for _, entry in ipairs(result.entries) do
+		if config_mod.list(entry.adapter) == nil then
+			declared = declared + 1
+		end
+	end
 
 	if declared == 0 and #result.entries == 0 and #result.skipped == 0 then
 		vim.health.info("no tools declared")

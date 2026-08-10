@@ -336,3 +336,89 @@ describe("check.run accounting", function()
 		end)
 	end)
 end)
+
+-- One spec per claim. The previous round shipped a severity channel that was
+-- annotated, read at the call site, and described in the commit message while
+-- no return path ever populated it — because nothing asserted it.
+describe("check.run diagnosis fidelity", function()
+	it("calls a raising none-ls registry read an error, not a warning", function()
+		local none_ls = fake("none_ls", {
+			registered = function()
+				return false, "null-ls internals changed"
+			end,
+		})
+		with_adapters({ none_ls }, {}, function()
+			local skip = check.run().skipped[1]
+			assert.equals("error", skip.severity, "muster's own read failing is not a user warning")
+			assert.is_truthy(skip.reason:find("could not read", 1, true))
+		end)
+	end)
+
+	it("distinguishes a non-list registry return from an empty one", function()
+		local none_ls = fake("none_ls", {
+			registered = function()
+				return true, "not a table at all"
+			end,
+		})
+		with_adapters({ none_ls }, {}, function()
+			local skip = check.run().skipped[1]
+			assert.equals("error", skip.severity)
+			assert.is_truthy(skip.reason:find("not a list of sources", 1, true))
+			assert.is_nil(skip.reason:find("has no registered sources", 1, true))
+		end)
+	end)
+
+	it("reports a declared key that no adapter is registered for", function()
+		-- Otherwise the loop never visits it: no entry, no skip, total silence
+		-- over declared tools, and a Result that looks like a clean pass.
+		with_adapters({ fake("a") }, { a = { "one" }, guard = { "x", "y" } }, function()
+			local result = check.run()
+			local guard = vim.iter(result.skipped):find(function(s)
+				return s.adapter == "guard"
+			end)
+			assert.is_table(guard, "an unregistered setup key must be reported")
+			assert.equals("error", guard.severity)
+			assert.equals(2, guard.count)
+		end)
+	end)
+end)
+
+describe("registry.load_builtins", function()
+	before_each(function()
+		registry.reset()
+	end)
+
+	it("reports a third-party adapter squatting on a built-in id", function()
+		registry.register({
+			id = "conform",
+			available = function()
+				return true
+			end,
+			identity = tostring,
+			probe = function()
+				return { status = "missing", binary = "x" }
+			end,
+		})
+		local failures = registry.load_builtins()
+		assert.is_string(failures.conform, "a shadowed builtin must not yield silently")
+		assert.is_truthy(failures.conform:find("third-party", 1, true))
+	end)
+
+	it("keeps the original load error across repeated calls", function()
+		-- A second require of a module that raised returns Lua's "loop or
+		-- previous error" sentinel, which names a require loop that does not
+		-- exist and loses the real cause.
+		package.loaded["muster.adapters.lint"] = nil
+		local saved = package.preload["muster.adapters.lint"]
+		package.preload["muster.adapters.lint"] = function()
+			error("REAL CAUSE: something specific")
+		end
+		local first = registry.load_builtins()
+		local second = registry.load_builtins()
+		package.preload["muster.adapters.lint"] = saved
+		package.loaded["muster.adapters.lint"] = nil
+		registry.reset()
+		assert.is_truthy(first.lint:find("REAL CAUSE", 1, true))
+		assert.is_truthy(second.lint:find("REAL CAUSE", 1, true), "the cause must survive a second call")
+	end)
+end)
