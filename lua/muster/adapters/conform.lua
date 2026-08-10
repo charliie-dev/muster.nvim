@@ -53,8 +53,16 @@ function M.probe(entry, bufnr)
 	-- would report a false `missing`, or a false `found` if some unrelated
 	-- binary happens to share the name. The info API cannot express the
 	-- distinction, so the formatter's definition is consulted for `format`.
-	if info.command == name and M.is_lua_format(name, bufnr) then
-		return probe.unverifiable("formatter runs in-process: no external tool to be missing")
+	if info.command == name then
+		local is_lua, config_err = M.is_lua_format(name, bufnr)
+		if config_err then
+			-- The user's own config function raised. Reporting "not on $PATH"
+			-- would send them to install a binary that is beside the point.
+			return probe.broken(("the conform config for %q raised: %s"):format(name, config_err))
+		end
+		if is_lua then
+			return probe.unverifiable("formatter runs in-process: no external tool to be missing")
+		end
 	end
 	return probe.resolve(info.command)
 end
@@ -66,21 +74,31 @@ end
 ---`@private`; a require of the builtin module is a stable public path.
 ---@param name string
 ---@param bufnr integer
----@return boolean
+---@return boolean is_lua_format
+---@return string|nil err @The user's config raised; not the same as "no".
 function M.is_lua_format(name, bufnr)
 	local ok, conform = pcall(require, "conform")
 	if ok then
 		local override = conform.formatters and conform.formatters[name]
 		if type(override) == "function" then
 			local called_ok, called = pcall(override, bufnr)
-			override = called_ok and called or nil
+			if not called_ok then
+				return false, tostring(called)
+			end
+			override = called
 		end
 		if type(override) == "table" and type(override.format) == "function" then
 			return true
 		end
 	end
 	local mod_ok, mod = pcall(require, "conform.formatters." .. name)
-	return mod_ok and type(mod) == "table" and type(mod.format) == "function"
+	if not mod_ok then
+		-- A module that exists but raises on load is a broken config; one that
+		-- simply is not there is not. `require` reports both, so distinguish.
+		local missing = tostring(mod):find("module '.*' not found", 1, false)
+		return false, (not missing) and tostring(mod) or nil
+	end
+	return type(mod) == "table" and type(mod.format) == "function"
 end
 
 ---Formatters CONFIGURED for this buffer. `list_formatters` cannot be used here:

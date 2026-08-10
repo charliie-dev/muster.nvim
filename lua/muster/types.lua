@@ -53,7 +53,9 @@
 
 ---@class muster.Skip
 ---@field adapter string
----@field count integer
+---@field count integer  How many declared entries went unchecked.
+---@field severity "info"|"warn"|"error" Follows the KIND of skip, not the count:
+---  an adapter that raised is an error even with nothing declared behind it.
 ---@field reason string
 
 ---The public result. Its shape is covered by the compatibility promise.

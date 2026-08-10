@@ -1,8 +1,12 @@
 -- Entry point. Kept small and free of `require` calls at load time: this file
 -- runs eagerly at startup, so every module load is deferred into a callback.
 --
--- `vim.g.loaded_muster` both prevents double initialization and gives users a
--- documented way to disable muster without uninstalling it.
+-- `vim.g.loaded_muster` prevents double initialization and lets users suppress
+-- this file -- the :Muster command and the automatic check -- without
+-- uninstalling. It cannot disable an explicit `require("muster").setup()`: this
+-- file sets the flag itself once it runs, so the flag cannot distinguish "the
+-- user disabled us" from "we loaded normally", and calling setup() by hand is an
+-- explicit opt-in either way.
 
 if vim.g.loaded_muster then
 	return

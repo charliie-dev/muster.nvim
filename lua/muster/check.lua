@@ -66,6 +66,20 @@ local function entries_for(id, adapter)
 	local declared = config.list(id)
 	if declared then
 		if #declared == 0 then
+			if next(declared) ~= nil then
+				-- A map, not a list. `#t` is 0 for it, so calling this "empty"
+				-- would be three false statements at once: the list is not
+				-- empty, its entries were not counted, and tools WERE declared.
+				local keys = vim.tbl_keys(declared)
+				table.sort(keys, function(a, b)
+					return tostring(a) < tostring(b)
+				end)
+				return nil,
+					("declared list is a map, not a list; muster reads the array part, so %s %s ignored"):format(
+						table.concat(vim.tbl_map(vim.inspect, keys), ", "),
+						#keys == 1 and "was" or "were"
+					)
+			end
 			-- An empty list is not an all-clear: it is far more often a list
 			-- built programmatically by something that returned nothing.
 			return nil, "declared list is empty"
@@ -95,11 +109,24 @@ end
 ---@param value any
 ---@return muster.Probe
 local function validated(id, value)
-	if type(value) ~= "table" or not STATUSES[value.status] then
+	local function invalid(why)
 		return {
 			status = "broken",
-			reason = ("adapter %q returned an invalid probe: %s"):format(id, vim.inspect(value)),
+			reason = ("adapter %q returned an invalid probe (%s): %s"):format(id, why, vim.inspect(value)),
 		}
+	end
+	if type(value) ~= "table" or not STATUSES[value.status] then
+		return invalid("unrecognised status")
+	end
+	-- The requiredness rules are enforced HERE or nowhere: a third-party probe
+	-- is exactly the path they drift through, and a `found` with no path renders
+	-- as a green tick for something that was never verified.
+	if value.status == "found" then
+		if type(value.path) ~= "string" or type(value.source) ~= "string" or type(value.binary) ~= "string" then
+			return invalid("found without binary, path and source")
+		end
+	elseif value.status ~= "missing" and type(value.reason) ~= "string" then
+		return invalid(("%s without a reason"):format(value.status))
 	end
 	return value
 end
@@ -113,11 +140,28 @@ end
 local function probe_entries(result, id, adapter, entries, bufnr, seen)
 	for _, entry in ipairs(entries) do
 		local named, name = pcall(adapter.identity, entry)
+		if named and type(name) ~= "string" then
+			-- Not merely cosmetic: a non-string name flows into the dedupe key
+			-- and into the final sort, where comparing it raises OUTSIDE any
+			-- per-adapter guard and destroys every adapter's results.
+			named, name = false, ("identity() returned a %s, expected a string"):format(type(name))
+		end
 		if not named then
-			result.skipped[#result.skipped + 1] = { adapter = id, count = 1, reason = tostring(name) }
+			result.skipped[#result.skipped + 1] =
+				{ adapter = id, count = 1, severity = "error", reason = tostring(name) }
 		else
 			local key = id .. "\0" .. name
-			if not seen[key] then
+			if seen[key] then
+				-- Dropping a duplicate silently would hide a second, possibly
+				-- broken, definition of the same tool -- and in none-ls derived
+				-- mode the user never wrote the list, so could not notice.
+				result.skipped[#result.skipped + 1] = {
+					adapter = id,
+					count = 1,
+					severity = "warn",
+					reason = ("a further entry shares the identity %q and was not probed"):format(name),
+				}
+			else
 				seen[key] = true
 				local ok, probe = pcall(adapter.probe, entry, bufnr)
 				result.entries[#result.entries + 1] = {
@@ -143,7 +187,32 @@ function M.run(bufnr)
 
 	local loaded_ok, load_err = pcall(registry.load_builtins)
 	if not loaded_ok then
-		result.notes[#result.notes + 1] = ("muster could not load its built-in adapters: %s"):format(load_err)
+		-- A note alone would be silent: notes never notify, and with no adapters
+		-- registered there are no entries and no skips either, so a total
+		-- failure to load would produce a completely empty, clean-looking
+		-- report. Every declared list is accounted for instead.
+		local current = config.get() or {}
+		local reported = false
+		for key in pairs(current) do
+			local list = config.list(key)
+			if type(list) == "table" then
+				reported = true
+				result.skipped[#result.skipped + 1] = {
+					adapter = key,
+					count = #list,
+					severity = "error",
+					reason = ("muster could not load its built-in adapters: %s"):format(load_err),
+				}
+			end
+		end
+		if not reported then
+			result.skipped[#result.skipped + 1] = {
+				adapter = "muster",
+				count = 0,
+				severity = "error",
+				reason = ("muster could not load its built-in adapters: %s"):format(load_err),
+			}
+		end
 	end
 	mason_notes(result.notes)
 
@@ -155,7 +224,13 @@ function M.run(bufnr)
 			local entries, skip_reason = entries_for(id, adapter)
 			if not entries then
 				if skip_reason then
-					result.skipped[#result.skipped + 1] = { adapter = id, count = 0, reason = skip_reason }
+					local list = config.list(id)
+					result.skipped[#result.skipped + 1] = {
+						adapter = id,
+						count = type(list) == "table" and #list or 0,
+						severity = "warn",
+						reason = skip_reason,
+					}
 				end
 				return
 			end
@@ -166,6 +241,7 @@ function M.run(bufnr)
 				result.skipped[#result.skipped + 1] = {
 					adapter = id,
 					count = #entries,
+					severity = "warn",
 					reason = reason or "host plugin not loaded",
 				}
 				return
@@ -173,12 +249,23 @@ function M.run(bufnr)
 			probe_entries(result, id, adapter, entries, bufnr, seen)
 		end)
 		if not ok then
-			result.skipped[#result.skipped + 1] =
-				{ adapter = id, count = 0, reason = ("adapter raised during the check: %s"):format(tostring(err)) }
+			-- The real count matters: `health` must not render "0 entries
+			-- unchecked" at info level for an adapter that crashed with three
+			-- declared tools behind it.
+			local list = config.list(id)
+			result.skipped[#result.skipped + 1] = {
+				adapter = id,
+				count = type(list) == "table" and #list or 0,
+				severity = "error",
+				reason = ("adapter raised during the check: %s"):format(tostring(err)),
+			}
 		end
 	end
 
-	table.sort(result.entries, function(a, b)
+	-- Every name reaching here is a validated string, but the sort is the one
+	-- statement outside the per-adapter guards, so it is protected too: a raise
+	-- here would discard the whole report.
+	pcall(table.sort, result.entries, function(a, b)
 		if a.adapter ~= b.adapter then
 			return a.adapter < b.adapter
 		end

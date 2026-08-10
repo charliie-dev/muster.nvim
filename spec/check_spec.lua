@@ -249,3 +249,90 @@ describe("check.run resilience", function()
 		end)
 	end)
 end)
+
+describe("check.run accounting", function()
+	it("names a map-shaped list as a map, not as empty", function()
+		-- Three false statements otherwise: not empty, entries not counted,
+		-- and tools were declared.
+		registry.reset()
+		registry.register(fake("a"))
+		local saved = registry.load_builtins
+		registry.load_builtins = function() end
+		config.setup({})
+		-- Bypass config validation to reach entries_for's own guard.
+		local cfg = config.get()
+		cfg.a = { lua_ls = {}, gopls = {} }
+		local result = check.run()
+		registry.load_builtins = saved
+		config.reset()
+		registry.reset()
+		assert.equals(1, #result.skipped)
+		assert.is_truthy(result.skipped[1].reason:find("map, not a list", 1, true))
+	end)
+
+	it("rejects a probe that claims found without a path", function()
+		local thin = fake("a", {
+			probe = function()
+				return { status = "found" }
+			end,
+		})
+		with_adapters({ thin }, { a = { "one" } }, function()
+			local entry = check.run().entries[1]
+			assert.equals("broken", entry.probe.status)
+			assert.is_truthy(entry.probe.reason:find("found without", 1, true))
+		end)
+	end)
+
+	it("rejects a reason-bearing status that carries no reason", function()
+		local silent = fake("a", {
+			probe = function()
+				return { status = "unknown" }
+			end,
+		})
+		with_adapters({ silent }, { a = { "one" } }, function()
+			assert.equals("broken", check.run().entries[1].probe.status)
+		end)
+	end)
+
+	it("skips a non-string identity instead of letting the sort raise", function()
+		local numeric = fake("a", {
+			identity = function(e)
+				return e
+			end,
+		})
+		with_adapters({ numeric, fake("b") }, { a = { 7, "beta" }, b = { "ok" } }, function()
+			local ok, result = pcall(check.run)
+			assert.is_true(ok, "a non-string identity must not destroy the report")
+			assert.is_truthy(vim.iter(result.skipped):any(function(s)
+				return s.reason:find("expected a string", 1, true) ~= nil
+			end))
+			assert.is_truthy(
+				vim.iter(result.entries):any(function(e)
+					return e.adapter == "b"
+				end),
+				"other adapters' results must survive"
+			)
+		end)
+	end)
+
+	it("accounts for a duplicate identity rather than dropping it silently", function()
+		with_adapters({ fake("a") }, { a = { "dup", "dup" } }, function()
+			local result = check.run()
+			assert.equals(1, #result.entries)
+			assert.equals(1, #result.skipped)
+			assert.is_truthy(result.skipped[1].reason:find("shares the identity", 1, true))
+		end)
+	end)
+
+	it("marks a raising adapter as an error skip carrying its declared count", function()
+		local boom = fake("boom")
+		boom.available = function()
+			error("host query exploded")
+		end
+		with_adapters({ boom }, { boom = { "x", "y", "z" } }, function()
+			local skip = check.run().skipped[1]
+			assert.equals("error", skip.severity)
+			assert.equals(3, skip.count, "an adapter that crashed left three tools unchecked")
+		end)
+	end)
+end)

@@ -23,7 +23,15 @@ local ICON = {
 local function describe(entry)
 	local probe = entry.probe
 	if probe.status == "found" then
-		return ("%s (%s): %s — %s"):format(entry.name, entry.adapter, probe.source, probe.path)
+		-- `reason` on a found probe explains a `source` of "unknown" (the errno
+		-- from fs_realpath). It was being captured and rendered nowhere.
+		return ("%s (%s): %s — %s%s"):format(
+			entry.name,
+			entry.adapter,
+			probe.source,
+			probe.path,
+			probe.reason and ("  (" .. probe.reason .. ")") or ""
+		)
 	end
 	return ("%s (%s): %s%s"):format(
 		entry.name,
@@ -42,7 +50,9 @@ local function unknown_keys()
 		return {}
 	end
 	local registry = require("muster.registry")
-	registry.load_builtins()
+	-- A failure here must degrade the page, not abort it: this runs before the
+	-- rest of the health output.
+	pcall(registry.load_builtins)
 	local options = require("muster.config").OPTIONS
 	local unknown = {}
 	for key in pairs(config) do
@@ -86,18 +96,37 @@ function M.check()
 		vim.health.warn(note)
 	end
 	for _, skip in ipairs(result.skipped) do
-		-- A skip that hides declared entries is a warning, not trivia: those
-		-- tools went unchecked.
-		local level = skip.count > 0 and "warn" or "info"
+		-- Severity follows the KIND of skip, not the count. An adapter that
+		-- raised is an error even with nothing declared behind it; rendering it
+		-- as info produced a clean-looking health page over a crash.
+		local level = skip.severity or (skip.count > 0 and "warn" or "info")
 		vim.health[level](("%s: %s (%d entries unchecked)"):format(skip.adapter, skip.reason, skip.count))
 	end
 
-	if #result.entries == 0 then
+	-- Derived from the CONFIG, not from the result: `#entries == 0` also happens
+	-- when every declared tool was skipped, and "no tools declared" would then
+	-- contradict the skip lines immediately above it.
+	local declared = 0
+	for key in pairs(config) do
+		local list = config_mod.list(key)
+		if type(list) == "table" then
+			declared = declared + #list
+		end
+	end
+	if declared == 0 then
 		vim.health.info("no tools declared")
 		return
 	end
+	if #result.entries == 0 then
+		vim.health.warn(("%d tools declared, none probed — see the skips above"):format(declared))
+		return
+	end
+	vim.health.info(("%d tools declared, %d probed"):format(declared, #result.entries))
 	for _, entry in ipairs(result.entries) do
 		local level = ICON[entry.probe.status] or "info"
+		if entry.probe.status == "found" and entry.probe.source == "unknown" then
+			level = "warn"
+		end
 		vim.health[level](describe(entry))
 	end
 end

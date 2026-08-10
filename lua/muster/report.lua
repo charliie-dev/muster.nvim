@@ -103,7 +103,9 @@ function M.emit(result)
 	elseif problems > 1 then
 		header = ("muster: %d tools need attention"):format(problems)
 	else
-		header = "muster"
+		-- Only skips and/or unverifiable entries: still worth saying, but not as
+		-- a count of problems.
+		header = "muster: some tools were not checked"
 	end
 
 	vim.notify(header .. "\n" .. table.concat(lines, "\n"), vim.log.levels.WARN, { title = "muster" })

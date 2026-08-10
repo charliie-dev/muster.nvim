@@ -12,8 +12,13 @@ local M = {
 	id = "lsp",
 }
 
+---@return boolean loaded
+---@return string|nil reason
 function M.available()
-	return vim.lsp ~= nil and vim.lsp.config ~= nil
+	if vim.lsp ~= nil and vim.lsp.config ~= nil then
+		return true
+	end
+	return false, "vim.lsp.config is unavailable in this Neovim build"
 end
 
 ---@param entry any

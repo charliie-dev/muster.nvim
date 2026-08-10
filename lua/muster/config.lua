@@ -38,7 +38,12 @@ local function validate(opts)
 	vim.validate("notify_on_startup", opts.notify_on_startup, "boolean", true)
 	for key, value in pairs(opts) do
 		if not M.OPTIONS[key] then
-			vim.validate(key, value, "table", true)
+			-- A list, specifically. `{ lua_ls = { ... } }` is a natural thing to
+			-- write and `#t` reports it as empty, so accepting it quietly would
+			-- mean silently checking nothing.
+			vim.validate(key, value, function(v)
+				return v == nil or vim.islist(v)
+			end, true, "a list of tool entries (got a map?)")
 		end
 	end
 end

@@ -54,11 +54,20 @@ function M.probe(entry, _bufnr)
 		if not runnable then
 			if type(command) == "string" and command ~= "" then
 				-- Route through resolve so `binary` is a basename, as the
-				-- registry key contract requires, rather than a raw path.
-				local p = probe.resolve(command)
-				p.status = "missing"
-				p.reason = "the source's own can_run() reports it cannot run"
-				return p
+				-- registry key contract requires, rather than a raw path. Only a
+				-- resolve that itself succeeded may be downgraded: stamping
+				-- `missing` over a `broken` would discard a real config error,
+				-- and stamping it over a `found` would tell the user a tool that
+				-- IS on $PATH is not.
+				local resolved = probe.resolve(command)
+				if resolved.status == "broken" then
+					return resolved
+				end
+				return {
+					status = "missing",
+					binary = resolved.binary,
+					reason = "the source's own can_run() reports it cannot run",
+				}
 			end
 			return probe.broken("can_run() reports the source cannot run, and it declares no command")
 		end
