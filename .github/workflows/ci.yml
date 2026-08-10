@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: busted (Neovim ${{ matrix.neovim }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # muster targets the latest stable Neovim and does not carry version
+        # fallbacks; nightly runs alongside it as an early warning, not a gate.
+        neovim: [v0.12.0, nightly]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run specs
+        uses: lumen-oss/nvim-busted-action@v1
+        with:
+          nvim_version: ${{ matrix.neovim }}
+    continue-on-error: ${{ matrix.neovim == 'nightly' }}
+
+  stylua:
+    name: stylua
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: JohnnyMorganz/stylua-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: latest
+          args: --check lua plugin spec
+
+  selene:
+    name: selene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: NTBBloodbath/selene-action@v1.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: --display-style=quiet lua plugin spec
+
+  typecheck:
+    name: lua-language-server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mrcjkb/lua-typecheck-action@v0
+        with:
+          directories: lua
+
+  debug-statements:
+    name: no leftover debug calls
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject stray print/vim.print
+        run: |
+          # muster reports through vim.notify and vim.health; a bare print in
+          # library code is always a leftover.
+          if grep -rnE '(^|[^%.a-zA-Z_])(vim\.)?print\(' lua/ plugin/; then
+            echo "::error::leftover debug print() found"
+            exit 1
+          fi

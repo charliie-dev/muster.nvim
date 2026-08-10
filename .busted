@@ -1,4 +1,13 @@
+-- Run the specs with Neovim as the Lua interpreter, so `vim.*` is the real API
+-- rather than a mock. `lpath` puts lua/ on the module path without installing.
 return {
-	_all = { coverage = false },
-	default = { verbose = true, ["lpath"] = "lua/?.lua;lua/?/init.lua" },
+	_all = {
+		coverage = false,
+		lua = "nlua",
+	},
+	default = {
+		verbose = true,
+		ROOT = { "spec" },
+		lpath = "lua/?.lua;lua/?/init.lua",
+	},
 }
