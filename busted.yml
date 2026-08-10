@@ -1,0 +1,62 @@
+---
+# selene standard library for busted + luassert, so `selene` can lint spec/
+# without flagging the test DSL as undefined globals.
+globals:
+  describe:
+    args:
+      - type: string
+      - type: function
+  insulate:
+    args:
+      - type: string
+      - type: function
+  expose:
+    args:
+      - type: string
+      - type: function
+  it:
+    args:
+      - type: string
+      - type: function
+  pending:
+    args:
+      - type: string
+      - type: function
+        required: false
+  before_each:
+    args:
+      - type: function
+  after_each:
+    args:
+      - type: function
+  setup:
+    args:
+      - type: function
+  teardown:
+    args:
+      - type: function
+  lazy_setup:
+    args:
+      - type: function
+  lazy_teardown:
+    args:
+      - type: function
+  strict_setup:
+    args:
+      - type: function
+  strict_teardown:
+    args:
+      - type: function
+  finally:
+    args:
+      - type: function
+  randomize:
+    args:
+      - type: bool
+        required: false
+  spy:
+    any: true
+  stub:
+    any: true
+  mock:
+    any: true
