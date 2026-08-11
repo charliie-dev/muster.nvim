@@ -53,6 +53,137 @@ local function names(entries)
 	end, entries)
 end
 
+local function protect(body, cleanup)
+	local body_ok, body_err = xpcall(body, debug.traceback)
+	local cleanup_ok, cleanup_err = xpcall(cleanup, debug.traceback)
+	if not body_ok then
+		if not cleanup_ok then
+			body_err = body_err .. "\ncleanup also failed:\n" .. cleanup_err
+		end
+		error(body_err, 0)
+	end
+	if not cleanup_ok then
+		error(cleanup_err, 0)
+	end
+end
+
+local function cleanup_all(...)
+	local errors = {}
+	for index = 1, select("#", ...) do
+		local action = select(index, ...)
+		local ok, err = xpcall(action, debug.traceback)
+		if not ok then
+			errors[#errors + 1] = err
+		end
+	end
+	if #errors > 0 then
+		error(table.concat(errors, "\ncleanup also failed:\n"), 0)
+	end
+end
+
+local function close_overlay(win, report_buf, source_buf)
+	cleanup_all(function()
+		if win and vim.api.nvim_win_is_valid(win) then
+			vim.api.nvim_win_close(win, true)
+		end
+	end, function()
+		if report_buf and vim.api.nvim_buf_is_valid(report_buf) then
+			vim.api.nvim_buf_delete(report_buf, { force = true })
+		end
+	end, function()
+		if source_buf and vim.api.nvim_buf_is_valid(source_buf) then
+			vim.api.nvim_buf_delete(source_buf, { force = true })
+		end
+	end)
+end
+
+describe("overlay spec cleanup", function()
+	it("runs cleanup even when the protected body fails", function()
+		local cleaned = false
+		local ok = pcall(function()
+			protect(function()
+				error("deliberate body failure")
+			end, function()
+				cleaned = true
+			end)
+		end)
+		assert.is_false(ok)
+		assert.is_true(cleaned)
+	end)
+
+	it("preserves the body error when cleanup also fails", function()
+		local cleaned = false
+		local ok, err = pcall(function()
+			protect(function()
+				error("deliberate body failure")
+			end, function()
+				cleanup_all(function()
+					error("deliberate cleanup failure")
+				end, function()
+					cleaned = true
+				end)
+			end)
+		end)
+		local body_error = err:find("deliberate body failure", 1, true)
+		local cleanup_error = err:find("deliberate cleanup failure", 1, true)
+		assert.is_false(ok)
+		assert.is_true(cleaned)
+		assert.is_truthy(body_error)
+		assert.is_truthy(cleanup_error)
+		assert.is_true(body_error < cleanup_error)
+	end)
+
+	it("restores overridden modules and overlay resources after an assertion failure", function()
+		with_adapters({ fake("a") }, { a = { "tool" } }, function(overlay)
+			local version = require("muster.version")
+			local saved_resolve = version.resolve
+			local saved_runner = package.loaded["muster.runner"]
+			local source_buf, report_buf, win
+			version.resolve = function(_, callback)
+				callback({ value = "1.0.0", tier = 4 })
+			end
+			package.loaded["muster.runner"] = { start = function() end }
+
+			local ok, err = pcall(function()
+				protect(function()
+					source_buf = vim.api.nvim_create_buf(false, true)
+					report_buf, win = overlay.open(source_buf)
+					error("deliberate overlay assertion failure")
+				end, function()
+					cleanup_all(function()
+						error("deliberate first cleanup failure")
+					end, function()
+						version.resolve = saved_resolve
+					end, function()
+						package.loaded["muster.runner"] = saved_runner
+					end, function()
+						close_overlay(win, report_buf, source_buf)
+					end)
+				end)
+			end)
+
+			local resolver_restored = version.resolve == saved_resolve
+			local runner_restored = package.loaded["muster.runner"] == saved_runner
+			local window_closed = not win or not vim.api.nvim_win_is_valid(win)
+			local report_deleted = not report_buf or not vim.api.nvim_buf_is_valid(report_buf)
+			local source_deleted = not source_buf or not vim.api.nvim_buf_is_valid(source_buf)
+			-- Defensive cleanup keeps this spec isolated even if an assertion below fails.
+			version.resolve = saved_resolve
+			package.loaded["muster.runner"] = saved_runner
+			pcall(close_overlay, win, report_buf, source_buf)
+
+			assert.is_false(ok)
+			assert.is_truthy(err:find("deliberate overlay assertion failure", 1, true))
+			assert.is_truthy(err:find("deliberate first cleanup failure", 1, true))
+			assert.is_true(resolver_restored)
+			assert.is_true(runner_restored)
+			assert.is_true(window_closed)
+			assert.is_true(report_deleted)
+			assert.is_true(source_deleted)
+		end)
+	end)
+end)
+
 describe("overlay.collect", function()
 	it("re-probes declared and live entries against the invoking buffer", function()
 		local probed = {}
@@ -294,36 +425,40 @@ describe("overlay.open", function()
 			local version = require("muster.version")
 			local saved_resolve = version.resolve
 			local finish
+			local source_buf, report_buf, win
 			version.resolve = function(_, callback)
 				finish = callback
 			end
 
-			local source_buf = vim.api.nvim_create_buf(false, true)
-			vim.bo[source_buf].filetype = "lua"
-			local report_buf, win = overlay.open(source_buf)
-			assert.is_true(vim.api.nvim_win_is_valid(win))
-			assert.equals("editor", vim.api.nvim_win_get_config(win).relative)
-			assert.equals("nofile", vim.bo[report_buf].buftype)
-			assert.equals("muster://report", vim.api.nvim_buf_get_name(report_buf))
-			assert.same({}, vim.api.nvim_buf_get_keymap(report_buf, "n"))
-			assert.is_truthy(
-				table.concat(vim.api.nvim_buf_get_lines(report_buf, 0, -1, false), "\n"):find("…", 1, true)
-			)
+			protect(function()
+				source_buf = vim.api.nvim_create_buf(false, true)
+				vim.bo[source_buf].filetype = "lua"
+				report_buf, win = overlay.open(source_buf)
+				assert.is_true(vim.api.nvim_win_is_valid(win))
+				assert.equals("editor", vim.api.nvim_win_get_config(win).relative)
+				assert.equals("nofile", vim.bo[report_buf].buftype)
+				assert.equals("muster://report", vim.api.nvim_buf_get_name(report_buf))
+				assert.same({}, vim.api.nvim_buf_get_keymap(report_buf, "n"))
+				assert.is_truthy(
+					table.concat(vim.api.nvim_buf_get_lines(report_buf, 0, -1, false), "\n"):find("…", 1, true)
+				)
 
-			finish({ value = "9.8.7", tier = 4 })
-			vim.wait(100, function()
-				return table.concat(vim.api.nvim_buf_get_lines(report_buf, 0, -1, false), "\n"):find("9.8.7", 1, true)
-					~= nil
+				finish({ value = "9.8.7", tier = 4 })
+				vim.wait(100, function()
+					return table
+						.concat(vim.api.nvim_buf_get_lines(report_buf, 0, -1, false), "\n")
+						:find("9.8.7", 1, true) ~= nil
+				end)
+				assert.is_truthy(
+					table.concat(vim.api.nvim_buf_get_lines(report_buf, 0, -1, false), "\n"):find("9.8.7", 1, true)
+				)
+			end, function()
+				cleanup_all(function()
+					version.resolve = saved_resolve
+				end, function()
+					close_overlay(win, report_buf, source_buf)
+				end)
 			end)
-			assert.is_truthy(
-				table.concat(vim.api.nvim_buf_get_lines(report_buf, 0, -1, false), "\n"):find("9.8.7", 1, true)
-			)
-
-			version.resolve = saved_resolve
-			vim.api.nvim_win_close(win, true)
-			if vim.api.nvim_buf_is_valid(source_buf) then
-				vim.api.nvim_buf_delete(source_buf, { force = true })
-			end
 		end)
 	end)
 
@@ -350,6 +485,7 @@ describe("overlay.open", function()
 			local saved_resolve = version.resolve
 			local saved_runner = package.loaded["muster.runner"]
 			local resolved = {}
+			local report_buf, win
 			version.resolve = function(entry, callback)
 				resolved[#resolved + 1] = entry.name
 				callback({ value = "1.0.0", tier = 4 })
@@ -360,12 +496,18 @@ describe("overlay.open", function()
 				end,
 			}
 
-			local _, win = overlay.open(vim.api.nvim_get_current_buf())
-			assert.same({ "found" }, resolved)
-
-			version.resolve = saved_resolve
-			package.loaded["muster.runner"] = saved_runner
-			vim.api.nvim_win_close(win, true)
+			protect(function()
+				report_buf, win = overlay.open(vim.api.nvim_get_current_buf())
+				assert.same({ "found" }, resolved)
+			end, function()
+				cleanup_all(function()
+					version.resolve = saved_resolve
+				end, function()
+					package.loaded["muster.runner"] = saved_runner
+				end, function()
+					close_overlay(win, report_buf)
+				end)
+			end)
 		end)
 	end)
 end)

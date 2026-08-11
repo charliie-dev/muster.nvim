@@ -20,6 +20,19 @@ local function found(source, opts)
 	}
 end
 
+local function receipt(bin_links)
+	local value = {
+		get_links = function()
+			return { bin = bin_links }
+		end,
+	}
+	return {
+		or_else = function()
+			return value
+		end,
+	}
+end
+
 local function resolve(version, entry)
 	local result
 	version.resolve(entry, function(value)
@@ -52,6 +65,27 @@ local function with_fakes(opts, fn)
 	end
 end
 
+local function resolve_windows_packages(packages)
+	local result
+	with_fakes({
+		registry = {
+			get_all_packages = function()
+				return packages
+			end,
+		},
+		spawn = function(_, _, callback)
+			callback({ code = 0, output = "tool 9.9.9" })
+		end,
+	}, function(version)
+		local entry = found("mason", {
+			path = "C:/mason/bin/tool.cmd",
+			realpath = "C:/mason/bin/tool.cmd",
+		})
+		result = resolve(version, entry)
+	end)
+	return result
+end
+
 describe("version.resolve", function()
 	it("does not spawn or cache an entry that was not found", function()
 		local spawns = 0
@@ -73,6 +107,9 @@ describe("version.resolve", function()
 	it("reads an installed Mason version without spawning", function()
 		local pkg = {
 			spec = { bin = { tool = "bin/tool" } },
+			get_install_path = function()
+				return "/mason/packages/tool"
+			end,
 			get_installed_version = function()
 				return "3.19.0"
 			end,
@@ -87,7 +124,318 @@ describe("version.resolve", function()
 				error("tier 1 must not spawn when the receipt has a version")
 			end,
 		}, function(version)
-			assert.same({ value = "3.19.0", tier = 1 }, resolve(version, found("mason")))
+			local entry = found("mason", {
+				path = "/mason/bin/tool",
+				realpath = "/mason/packages/tool/bin/tool",
+			})
+			assert.same({ value = "3.19.0", tier = 1 }, resolve(version, entry))
+		end)
+	end)
+
+	it("uses the package that owns a colliding binary regardless of registry order", function()
+		local function pkg(name, installed_version)
+			return {
+				spec = { bin = { tool = "bin/tool" } },
+				get_install_path = function()
+					return "/mason/packages/" .. name
+				end,
+				get_installed_version = function()
+					return installed_version
+				end,
+			}
+		end
+		local package_a = pkg("package-a", "1.0.0")
+		local package_b = pkg("package-b", "2.0.0")
+		local function assert_order(packages)
+			with_fakes({
+				registry = {
+					get_all_packages = function()
+						return packages
+					end,
+				},
+				spawn = function()
+					error("an owned Mason executable must resolve from its receipt")
+				end,
+			}, function(version)
+				local entry = found("mason", {
+					path = "/mason/bin/tool",
+					realpath = "/mason/packages/package-b/bin/tool",
+				})
+				assert.same({ value = "2.0.0", tier = 1 }, resolve(version, entry))
+			end)
+		end
+		assert_order({ package_a, package_b })
+		assert_order({ package_b, package_a })
+	end)
+
+	it("matches a Windows Mason cmd wrapper to its receipt despite casing differences", function()
+		local pkg = {
+			spec = { bin = { tool = "bin/tool.exe" } },
+			get_install_path = function()
+				return "C:\\Users\\Alice\\AppData\\Local\\nvim-data\\mason\\packages\\tool"
+			end,
+			get_receipt = function()
+				return receipt({ ["TOOL.CMD"] = "BIN\\tool.EXE" })
+			end,
+			get_installed_version = function()
+				return "4.5.6"
+			end,
+		}
+		with_fakes({
+			registry = {
+				get_all_packages = function()
+					return { pkg }
+				end,
+			},
+			spawn = function()
+				error("equivalent Windows paths must retain tier 1")
+			end,
+		}, function(version)
+			local entry = found("mason", {
+				path = "C:/Users/Alice/AppData/Local/nvim-data/mason/bin/tool.cmd",
+				realpath = "C:/Users/ALICE/AppData/Local/nvim-data/mason/bin/tool.cmd",
+			})
+			assert.same({ value = "4.5.6", tier = 1 }, resolve(version, entry))
+		end)
+	end)
+
+	it("matches a native UNC Mason cmd wrapper to its receipt", function()
+		local pkg = {
+			spec = { bin = { tool = "bin/tool.exe" } },
+			get_install_path = function()
+				return "\\\\server\\share\\mason\\packages\\tool"
+			end,
+			get_receipt = function()
+				-- Schema 1 receipts stored the executable name without `.cmd`.
+				return receipt({ TOOL = "bin\\tool.exe" })
+			end,
+			get_installed_version = function()
+				return "4.5.6"
+			end,
+		}
+		with_fakes({
+			registry = {
+				get_all_packages = function()
+					return { pkg }
+				end,
+			},
+			spawn = function()
+				error("equivalent UNC paths must retain tier 1")
+			end,
+		}, function(version)
+			local entry = found("mason", {
+				path = "\\\\server\\share\\mason\\bin\\tool.cmd",
+				realpath = "\\\\SERVER\\Share\\Mason\\bin\\tool.cmd",
+			})
+			assert.same({ value = "4.5.6", tier = 1 }, resolve(version, entry))
+		end)
+	end)
+
+	it("falls through when a Windows wrapper has no receipt ownership", function()
+		local spawned
+		local pkg = {
+			spec = { bin = { tool = "bin/tool.exe" } },
+			get_install_path = function()
+				return "C:/mason/packages/tool"
+			end,
+			get_receipt = function()
+				return { or_else = function() end }
+			end,
+			get_installed_version = function()
+				return "4.5.6"
+			end,
+		}
+		with_fakes({
+			registry = {
+				get_all_packages = function()
+					return { pkg }
+				end,
+			},
+			spawn = function(cmd, _, callback)
+				spawned = cmd[1]
+				callback({ code = 0, output = "tool 9.9.9" })
+			end,
+		}, function(version)
+			local entry = found("mason", {
+				path = "C:/mason/bin/tool.cmd",
+				realpath = "C:/mason/bin/tool.cmd",
+			})
+			assert.same({ value = "9.9.9", tier = 4 }, resolve(version, entry))
+			assert.equals("C:/mason/bin/tool.cmd", spawned)
+		end)
+	end)
+
+	it("contains failures from each Mason receipt Optional API step", function()
+		local failures = {
+			function()
+				error("get_receipt failed")
+			end,
+			function()
+				return {
+					or_else = function()
+						error("or_else failed")
+					end,
+				}
+			end,
+			function()
+				return {
+					or_else = function()
+						return {
+							get_links = function()
+								error("get_links failed")
+							end,
+						}
+					end,
+				}
+			end,
+		}
+		for _, get_receipt in ipairs(failures) do
+			local pkg = {
+				spec = { bin = { tool = "bin/tool.exe" } },
+				get_install_path = function()
+					return "C:/mason/packages/tool"
+				end,
+				get_receipt = get_receipt,
+				get_installed_version = function()
+					return "4.5.6"
+				end,
+			}
+			assert.same({ value = "9.9.9", tier = 4 }, resolve_windows_packages({ pkg }))
+		end
+	end)
+
+	it("rejects absolute and traversing Windows receipt targets", function()
+		local targets = {
+			"D:/outside/tool.exe",
+			"bin\\..\\..\\outside\\tool.exe",
+		}
+		for _, target in ipairs(targets) do
+			local pkg = {
+				spec = { bin = { tool = "bin/tool.exe" } },
+				get_install_path = function()
+					return "C:/mason/packages/tool"
+				end,
+				get_receipt = function()
+					return receipt({ ["tool.cmd"] = target })
+				end,
+				get_installed_version = function()
+					return "4.5.6"
+				end,
+			}
+			assert.same({ value = "9.9.9", tier = 4 }, resolve_windows_packages({ pkg }))
+		end
+	end)
+
+	it("falls through when multiple Mason receipts claim a Windows wrapper", function()
+		local function pkg(name)
+			return {
+				spec = { bin = { tool = "bin/tool.exe" } },
+				get_install_path = function()
+					return "C:/mason/packages/" .. name
+				end,
+				get_receipt = function()
+					return receipt({ ["tool.cmd"] = "bin/tool.exe" })
+				end,
+				get_installed_version = function()
+					return name
+				end,
+			}
+		end
+		local packages = { pkg("package-a"), pkg("package-b") }
+		assert.same({ value = "9.9.9", tier = 4 }, resolve_windows_packages(packages))
+	end)
+
+	it("does not treat a similarly prefixed Mason path as package ownership", function()
+		local spawned
+		with_fakes({
+			registry = {
+				get_all_packages = function()
+					return {
+						{
+							spec = { bin = { tool = "bin/tool" } },
+							get_install_path = function()
+								return "/mason/packages/package-a"
+							end,
+							get_installed_version = function()
+								return "1.0.0"
+							end,
+						},
+					}
+				end,
+			},
+			spawn = function(cmd, _, callback)
+				spawned = cmd[1]
+				callback({ code = 0, output = "tool 2.0.0" })
+			end,
+		}, function(version)
+			local entry = found("mason", {
+				path = "/mason/bin/tool",
+				realpath = "/mason/packages/package-ab/bin/tool",
+			})
+			assert.same({ value = "2.0.0", tier = 4 }, resolve(version, entry))
+			assert.equals("/mason/bin/tool", spawned)
+		end)
+	end)
+
+	it("falls through when registry packages do not declare the probed binary", function()
+		local spawned
+		with_fakes({
+			registry = {
+				get_all_packages = function()
+					return {
+						{
+							spec = { bin = { another_tool = "bin/another-tool" } },
+							get_install_path = function()
+								return "/mason/packages/tool"
+							end,
+							get_installed_version = function()
+								return "1.0.0"
+							end,
+						},
+					}
+				end,
+			},
+			spawn = function(cmd, _, callback)
+				spawned = cmd[1]
+				callback({ code = 0, output = "tool 2.0.0" })
+			end,
+		}, function(version)
+			local entry = found("mason", {
+				path = "/mason/bin/tool",
+				realpath = "/mason/packages/tool/bin/tool",
+			})
+			assert.same({ value = "2.0.0", tier = 4 }, resolve(version, entry))
+			assert.equals("/mason/bin/tool", spawned)
+		end)
+	end)
+
+	it("falls through when multiple Mason packages could own the resolved executable", function()
+		local function pkg(version)
+			return {
+				spec = { bin = { tool = "bin/tool" } },
+				get_install_path = function()
+					return "/mason/packages/shared"
+				end,
+				get_installed_version = function()
+					return version
+				end,
+			}
+		end
+		with_fakes({
+			registry = {
+				get_all_packages = function()
+					return { pkg("1.0.0"), pkg("2.0.0") }
+				end,
+			},
+			spawn = function(_, _, callback)
+				callback({ code = 0, output = "tool 3.0.0" })
+			end,
+		}, function(version)
+			local entry = found("mason", {
+				path = "/mason/bin/tool",
+				realpath = "/mason/packages/shared/bin/tool",
+			})
+			assert.same({ value = "3.0.0", tier = 4 }, resolve(version, entry))
 		end)
 	end)
 

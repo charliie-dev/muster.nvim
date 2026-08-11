@@ -69,9 +69,89 @@ local function output_version(output)
 	return nil
 end
 
----@param binary string
+---@param path string|nil
+---@return boolean
+local function is_windows_path(path)
+	return type(path) == "string" and (path:match("^%a:[/\\]") ~= nil or path:match("^[/\\][/\\]") ~= nil)
+end
+
+---@param path string
+---@return string
+local function windows_normalize(path)
+	return vim.fs.normalize((path:gsub("\\", "/"))):lower()
+end
+
+---@param path string|nil
+---@param root string|nil
+---@return boolean
+local function path_is_within(path, root)
+	if type(path) ~= "string" or type(root) ~= "string" or path == "" or root == "" then
+		return false
+	end
+	local windows = is_windows_path(path) and is_windows_path(root)
+	local normalized_path = windows and windows_normalize(path) or vim.fs.normalize(path)
+	local normalized_root = windows and windows_normalize(root) or vim.fs.normalize(root)
+	normalized_root = normalized_root:gsub("/+$", "")
+	return normalized_path == normalized_root or normalized_path:sub(1, #normalized_root + 1) == normalized_root .. "/"
+end
+
+---@param pkg any
+---@return table|nil
+local function receipt_bin_links(pkg)
+	local ok, links = pcall(function()
+		return pkg:get_receipt():or_else(nil):get_links()
+	end)
+	if not ok or type(links) ~= "table" or type(links.bin) ~= "table" then
+		return nil
+	end
+	return links.bin
+end
+
+---@param path string
+---@return boolean
+local function is_relative_path(path)
+	return path ~= "" and not path:match("^[/\\]") and not path:match("^%a:")
+end
+
+---@param pkg any
+---@param probe muster.Probe
+---@param install_path string
+---@return boolean
+local function owns_windows_wrapper(pkg, probe, install_path)
+	if not is_windows_path(probe.realpath) then
+		return false
+	end
+	local wrapper_name = windows_normalize(probe.realpath):match("([^/]+)$")
+	if not wrapper_name or not wrapper_name:match("%.cmd$") then
+		return false
+	end
+
+	local bins = receipt_bin_links(pkg)
+	if not bins then
+		return false
+	end
+	for linked_name, relative_target in pairs(bins) do
+		if
+			type(linked_name) == "string"
+			and not linked_name:find("[/\\]")
+			and type(relative_target) == "string"
+			and is_relative_path(relative_target)
+		then
+			local candidate = linked_name:lower()
+			if not candidate:match("%.cmd$") then
+				candidate = candidate .. ".cmd"
+			end
+			if candidate == wrapper_name then
+				return path_is_within(vim.fs.joinpath(install_path, relative_target), install_path)
+			end
+		end
+	end
+	return false
+end
+
+---@param probe muster.Probe
 ---@return string|nil
-local function mason_version(binary)
+local function mason_version(probe)
 	local ok_registry, registry = pcall(require, "mason-registry")
 	if not ok_registry or type(registry) ~= "table" or type(registry.get_all_packages) ~= "function" then
 		return nil
@@ -80,14 +160,29 @@ local function mason_version(binary)
 	if not ok_packages or type(packages) ~= "table" then
 		return nil
 	end
+
+	local owner
 	for _, pkg in ipairs(packages) do
 		local bins = type(pkg.spec) == "table" and pkg.spec.bin or nil
-		if type(bins) == "table" and bins[binary] ~= nil and type(pkg.get_installed_version) == "function" then
-			local ok_version, value = pcall(pkg.get_installed_version, pkg)
-			if ok_version and type(value) == "string" and value ~= "" then
-				return value
+		if type(bins) == "table" and bins[probe.binary] ~= nil and type(pkg.get_install_path) == "function" then
+			local ok_path, install_path = pcall(pkg.get_install_path, pkg)
+			local owns = ok_path
+				and type(install_path) == "string"
+				and (path_is_within(probe.realpath, install_path) or owns_windows_wrapper(pkg, probe, install_path))
+			if owns then
+				if owner then
+					return nil
+				end
+				owner = pkg
 			end
 		end
+	end
+	if not owner or type(owner.get_installed_version) ~= "function" then
+		return nil
+	end
+	local ok_version, value = pcall(owner.get_installed_version, owner)
+	if ok_version and type(value) == "string" and value ~= "" then
+		return value
 	end
 	return nil
 end
@@ -202,7 +297,7 @@ function M.resolve(entry, callback)
 	local tier = tier_for(probe.source)
 	local value
 	if tier == 1 then
-		value = mason_version(probe.binary)
+		value = mason_version(probe)
 	elseif tier == 2 then
 		value = nix_version(probe.realpath)
 	elseif tier == 3 then
