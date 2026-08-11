@@ -5,8 +5,8 @@ local config = require("muster.config")
 local report = require("muster.report")
 
 ---@return muster.Entry
-local function entry(adapter, name, probe)
-	return { adapter = adapter, name = name, declared = true, probe = probe, advice = {} }
+local function entry(adapter, name, probe, advice)
+	return { adapter = adapter, name = name, declared = true, probe = probe, advice = advice or {} }
 end
 
 ---@return muster.Result
@@ -77,6 +77,47 @@ describe("report.lines", function()
 			entries = { entry("lint", "z", { status = "unverifiable", reason = "cmd is a function" }) },
 		})
 		assert.is_truthy(#report.lines(res) > 0, '"we could not tell" must not render as silence')
+	end)
+end)
+
+describe("report advice rendering", function()
+	it("renders provider records without re-deriving package names", function()
+		local res = result({
+			entries = {
+				entry("conform", "stylua", { status = "missing", binary = "stylua" }, {
+					{
+						provider = "mason",
+						action = "install",
+						package = "stylua",
+						command = ":MasonInstall stylua",
+					},
+					{ provider = "nix", action = "declare", package = "stylua.out" },
+					{ provider = "mise", action = "declare", package = "stylua" },
+				}),
+				entry("lint", "ambiguous", { status = "missing", binary = "tool" }, {
+					{ provider = "nix", action = "declare" },
+				}),
+			},
+		})
+		local text = table.concat(report.lines(res), "\n")
+		assert.is_truthy(text:find(":MasonInstall stylua", 1, true))
+		assert.is_truthy(text:find("stylua.out", 1, true))
+		assert.is_truthy(text:find("mise", 1, true))
+		assert.is_truthy(text:find("ambiguous", 1, true))
+		assert.is_truthy(text:find("no package guessed", 1, true))
+	end)
+
+	it("uses action rather than command presence to render install advice", function()
+		local res = result({
+			entries = {
+				entry("conform", "stylua", { status = "missing", binary = "stylua" }, {
+					{ provider = "mason", action = "install", package = "stylua" },
+				}),
+			},
+		})
+		local text = table.concat(report.lines(res), "\n")
+		assert.is_truthy(text:find("install stylua via mason", 1, true))
+		assert.is_falsy(text:find("declare stylua via mason", 1, true))
 	end)
 end)
 

@@ -2,6 +2,7 @@
 local assert = require("luassert")
 
 local config = require("muster.config")
+local env = require("muster.env")
 local registry = require("muster.registry")
 
 ---Capture what `health.check()` emits, without a real :checkhealth session.
@@ -97,6 +98,38 @@ describe("health.check", function()
 		end)
 		assert.is_true(loud, "two unchecked tools must not render as a clean page")
 		assert.is_falsy(has(calls, "info", "no tools declared"))
+	end)
+
+	it("stays on the synchronous probe path without enrichment processes", function()
+		registry.register({
+			id = "ghost",
+			available = function()
+				return true
+			end,
+			identity = tostring,
+			probe = function()
+				return { status = "missing", binary = "ghost" }
+			end,
+		})
+		config.setup({ ghost = { "ghost" } })
+
+		local saved_executable = env.executable
+		local saved_spawn = env.spawn
+		local spawns = 0
+		env.executable = function(name)
+			return "/fake/bin/" .. name
+		end
+		env.spawn = function()
+			spawns = spawns + 1
+		end
+		local ok, calls = pcall(render, function()
+			require("muster.health").check()
+		end)
+		env.executable = saved_executable
+		env.spawn = saved_spawn
+		assert.is_true(ok)
+		assert.is_table(calls)
+		assert.equals(0, spawns)
 	end)
 
 	it("does not call a declared built-in key a typo", function()

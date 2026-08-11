@@ -29,16 +29,76 @@ function M.start()
 		return
 	end
 	ran = true
-	vim.schedule(function()
-		local ok, err = pcall(function()
-			require("muster.report").emit(require("muster.check").run())
-		end)
-		if not ok then
-			-- A raise inside vim.schedule would otherwise reach the user as an
-			-- unbranded traceback competing with the dashboard, or not at all.
-			vim.notify(("muster: the startup check failed: %s"):format(err), vim.log.levels.ERROR, { title = "muster" })
+	local function failed(err)
+		-- If the notification backend itself is broken, there is no reliable
+		-- secondary UI channel; containment is the only honest guarantee.
+		local notified, notify_err = pcall(
+			vim.notify,
+			("muster: the startup check failed: %s"):format(err),
+			vim.log.levels.ERROR,
+			{ title = "muster" }
+		)
+		return notified, notify_err
+	end
+
+	local cancelled = false
+	local started = false
+	local reported = false
+	local schedule_returned = false
+	local buffered_result
+	local function emit(result)
+		if cancelled or reported then
+			return
 		end
-	end)
+		reported = true
+		local emitted, emit_err = pcall(require("muster.report").emit, result)
+		if not emitted then
+			failed(emit_err)
+		end
+	end
+	local function complete(result)
+		if cancelled or reported or buffered_result then
+			return
+		end
+		if not schedule_returned then
+			buffered_result = result
+			return
+		end
+		emit(result)
+	end
+	local function run()
+		if started then
+			return
+		end
+		started = true
+		local ok, err = pcall(require("muster").check, nil, complete)
+		if not ok then
+			failed(err)
+		end
+	end
+
+	local run_requested = false
+	local function scheduled_run()
+		if not schedule_returned then
+			run_requested = true
+			return
+		end
+		run()
+	end
+	local scheduled, schedule_err = pcall(vim.schedule, scheduled_run)
+	schedule_returned = true
+	if not scheduled then
+		cancelled = true
+		buffered_result = nil
+		failed(schedule_err)
+	else
+		if run_requested then
+			run()
+		end
+		if buffered_result then
+			emit(buffered_result)
+		end
+	end
 end
 
 ---Test seam.

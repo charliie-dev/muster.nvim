@@ -27,6 +27,23 @@ local LABEL = {
 	unverifiable = "could not be verified",
 }
 
+---@param entry muster.Entry
+---@param advice muster.Advice
+---@return string
+local function advice_line(entry, advice)
+	local subject = ("%s (%s)"):format(entry.name, entry.adapter)
+	if not advice.package then
+		return ("  advice %s: %s matched multiple packages; no package guessed"):format(subject, advice.provider)
+	end
+	if advice.action == "install" then
+		if advice.command then
+			return ("  advice %s: %s package %s (%s)"):format(subject, advice.provider, advice.package, advice.command)
+		end
+		return ("  advice %s: install %s via %s"):format(subject, advice.package, advice.provider)
+	end
+	return ("  advice %s: declare %s via %s"):format(subject, advice.package, advice.provider)
+end
+
 ---@param result muster.Result
 ---@return string[]
 function M.lines(result)
@@ -49,6 +66,11 @@ function M.lines(result)
 		local bucket = by_status[status]
 		if bucket then
 			lines[#lines + 1] = ("  %s: %s"):format(LABEL[status], table.concat(bucket, ", "))
+		end
+	end
+	for _, entry in ipairs(result.entries) do
+		for _, advice in ipairs(entry.advice or {}) do
+			lines[#lines + 1] = advice_line(entry, advice)
 		end
 	end
 	for _, skip in ipairs(result.skipped) do

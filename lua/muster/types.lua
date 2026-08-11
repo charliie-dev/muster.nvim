@@ -41,15 +41,16 @@
 ---@class muster.Advice
 ---@field provider '"mason"'|'"nix"'|'"mise"'
 ---@field action '"install"'|'"declare"'
----@field package? string Only when a machine-readable source named it.
----@field command? string Only when the provider has a real one to run.
+---@field package? string Only for one unique machine-readable package match.
+---@field command? string Only when the provider has a real, unambiguous command.
 
 ---@class muster.Entry
 ---@field adapter string      Adapter id; with `name` this is the dedupe key.
 ---@field name string         From `adapter.identity(entry)`.
 ---@field declared boolean    false = discovered live, never named in setup().
 ---@field probe muster.Probe
----@field advice muster.Advice[] Always empty when `declared == false`.
+---@field advice muster.Advice[] Empty in raw `probe()` results and whenever
+---  `declared == false`; complete when async `check()` invokes its callback.
 
 ---@class muster.Skip
 ---@field adapter string

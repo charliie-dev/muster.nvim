@@ -34,16 +34,73 @@ function M.register(adapter)
 	require("muster.registry").register(adapter)
 end
 
----Probe the declared tools and return the result.
+---Synchronously probe the declared tools without enrichment or side effects.
 ---
----This is the reporting path: it is the only entry point that may emit a report
----and the only one that may hand off to Mason. `:Muster` and
----`:checkhealth muster` probe without doing either, so an inspection command can
----never install anything.
+---Used by read-only inspection surfaces. It never spawns enrichment processes,
+---emits a report, refreshes a registry, or hands anything to Mason.
 ---@param bufnr? integer @Defaults to the current buffer.
 ---@return muster.Result
-function M.check(bufnr)
+function M.probe(bufnr)
 	return require("muster.check").run(bufnr)
+end
+
+---Probe and asynchronously enrich the declared tools.
+---
+---The callback receives the Result only after every read-only provider has
+---settled. Nothing partially enriched is returned or mutated behind the caller's
+---back, and this explicit API never emits or provisions.
+---@param bufnr? integer @Defaults to the current buffer.
+---@param callback fun(result: muster.Result)
+function M.check(bufnr, callback)
+	vim.validate("callback", callback, "function")
+	local result = M.probe(bufnr)
+	local started = false
+	local delivered = false
+	local cancelled = false
+	local schedule_returned = false
+	local buffered_result
+
+	local function complete(enriched)
+		if cancelled or delivered or buffered_result then
+			return
+		end
+		if not schedule_returned then
+			buffered_result = enriched
+			return
+		end
+		delivered = true
+		callback(enriched)
+	end
+	local function start()
+		if started then
+			return
+		end
+		started = true
+		require("muster.enrich").run(result, complete)
+	end
+
+	local start_requested = false
+	local function scheduled_start()
+		if not schedule_returned then
+			start_requested = true
+			return
+		end
+		start()
+	end
+	local scheduled, schedule_err = pcall(vim.schedule, scheduled_start)
+	schedule_returned = true
+	if not scheduled then
+		cancelled = true
+		buffered_result = nil
+		error(schedule_err, 0)
+	end
+	if start_requested then
+		start()
+	end
+	if buffered_result and not delivered then
+		delivered = true
+		callback(buffered_result)
+	end
 end
 
 return M
