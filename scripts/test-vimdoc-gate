@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+write_canonical_vimdoc() {
+  local path="$1"
+  cat >"$path" <<'DOC'
+INSTALLATION AUTHORITY             *fixture-installation-authority*
+
+  Surface       Probe   Advice      Install
+  ------------- ------- ----------- -------
+  fixture       Yes     Read-only   No
+
+NEXT SECTION
+DOC
+}
+
+install_canonical_generator() {
+  local fixture="$1"
+  cat >"$fixture/scripts/generate-vimdoc" <<'GENERATOR'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >doc/muster.txt <<'DOC'
+INSTALLATION AUTHORITY             *fixture-installation-authority*
+
+  Surface       Probe   Advice      Install
+  ------------- ------- ----------- -------
+  fixture       Yes     Read-only   No
+
+NEXT SECTION
+DOC
+GENERATOR
+}
+
+new_fixture() {
+  local name="$1"
+  local fixture="$tmp/$name"
+  mkdir -p "$fixture/scripts" "$fixture/doc"
+  cp "$repo_root/scripts/check-vimdoc" "$fixture/scripts/check-vimdoc"
+  write_canonical_vimdoc "$fixture/doc/muster.txt"
+  cat >"$fixture/scripts/generate-vimdoc" <<'GENERATOR'
+#!/usr/bin/env bash
+set -euo pipefail
+GENERATOR
+  chmod +x "$fixture/scripts/check-vimdoc" "$fixture/scripts/generate-vimdoc"
+  git -C "$fixture" init -q
+  git -C "$fixture" config user.name fixture
+  git -C "$fixture" config user.email fixture@example.invalid
+  git -C "$fixture" add scripts doc/muster.txt
+  git -C "$fixture" commit -qm initial
+  printf '%s\n' "$fixture"
+}
+
+expect_failure() {
+  local label="$1"
+  local fixture="$2"
+  local marker="$3"
+  if "$fixture/scripts/check-vimdoc" >"$tmp/$label.out" 2>&1; then
+    echo "$label unexpectedly passed"
+    exit 1
+  fi
+  if ! grep -F -- "$marker" "$tmp/$label.out" >/dev/null; then
+    echo "$label did not report the expected failure"
+    exit 1
+  fi
+}
+
+assert_staged_change() {
+  local label="$1"
+  local fixture="$2"
+  if git -C "$fixture" diff --cached --quiet HEAD -- doc/muster.txt; then
+    echo "$label did not create a staged change"
+    exit 1
+  fi
+}
+
+assert_cancellation_state() {
+  local label="$1"
+  local fixture="$2"
+  assert_staged_change "$label" "$fixture"
+  if ! git -C "$fixture" diff --quiet HEAD -- doc/muster.txt; then
+    echo "$label worktree does not match HEAD"
+    exit 1
+  fi
+}
+
+restore_fixture() {
+  local label="$1"
+  local fixture="$2"
+  git -C "$fixture" reset --hard -q HEAD
+  git -C "$fixture" clean -fdq
+  if [[ -n "$(git -C "$fixture" status --short)" ]] \
+    || ! git -C "$fixture" diff --quiet -- \
+    || ! git -C "$fixture" diff --cached --quiet HEAD --; then
+    echo "$label cleanup did not restore the index and worktree"
+    exit 1
+  fi
+}
+
+clean="$(new_fixture clean)"
+"$clean/scripts/check-vimdoc"
+restore_fixture clean "$clean"
+
+staged_bytes="$(new_fixture staged-bytes)"
+printf 'staged-sensitive-bytes\n' >"$staged_bytes/doc/muster.txt"
+git -C "$staged_bytes" add doc/muster.txt
+install_canonical_generator "$staged_bytes"
+assert_staged_change staged-bytes "$staged_bytes"
+expect_failure staged-bytes "$staged_bytes" \
+  '::error::generated vimdoc index differs from HEAD'
+assert_cancellation_state staged-bytes "$staged_bytes"
+restore_fixture staged-bytes "$staged_bytes"
+
+staged_symlink="$(new_fixture staged-symlink)"
+printf 'do not overwrite\n' >"$staged_symlink/target.txt"
+rm "$staged_symlink/doc/muster.txt"
+ln -s ../target.txt "$staged_symlink/doc/muster.txt"
+git -C "$staged_symlink" add doc/muster.txt
+rm "$staged_symlink/doc/muster.txt"
+write_canonical_vimdoc "$staged_symlink/doc/muster.txt"
+assert_cancellation_state staged-symlink "$staged_symlink"
+if [[ "$(git -C "$staged_symlink" ls-files -s doc/muster.txt)" != 120000* ]]; then
+  echo 'staged-symlink did not stage a symbolic-link mode'
+  exit 1
+fi
+expect_failure staged-symlink "$staged_symlink" \
+  '::error::generated vimdoc index differs from HEAD'
+test "$(cat "$staged_symlink/target.txt")" = 'do not overwrite'
+restore_fixture staged-symlink "$staged_symlink"
+
+committed_deletion="$(new_fixture committed-deletion)"
+git -C "$committed_deletion" rm -q doc/muster.txt
+git -C "$committed_deletion" commit -qm deletion
+mkdir -p "$committed_deletion/doc"
+write_canonical_vimdoc "$committed_deletion/doc/muster.txt"
+expect_failure committed-deletion "$committed_deletion" \
+  '::error::doc/muster.txt must be a tracked regular file and not a symlink'
+restore_fixture committed-deletion "$committed_deletion"
+
+modified="$(new_fixture modified)"
+printf '\nmodified\n' >>"$modified/doc/muster.txt"
+expect_failure modified "$modified" \
+  '::error::generated vimdoc worktree differs from the index'
+restore_fixture modified "$modified"
+
+printf 'vimdoc gate fixtures passed\n'

@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+workflow="$repo_root/.github/workflows/ci.yml"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+guard_script="$tmp/guard.sh"
+ruby - "$workflow" "$guard_script" <<'RUBY'
+require "psych"
+
+workflow_path, guard_path = ARGV
+workflow = Psych.safe_load(File.binread(workflow_path), aliases: false)
+jobs = workflow.fetch("jobs")
+static_job = jobs.fetch("static")
+static_steps = static_job.fetch("steps")
+test_job = jobs.fetch("test")
+
+checkout = [
+  "actions/checkout",
+  "3d3c42e5aac5ba805825da76410c181273ba90b1",
+].join("@")
+installer = [
+  "nixbuild/nix-quick-install-action",
+  "9f63be77f412a248c9d9a65a4c82cf066cdf8f0c",
+].join("@")
+
+def assert(condition, message)
+  raise message unless condition
+end
+
+guard_index = static_steps.index { |step| step["name"] == "Reject unapproved action references" }
+assert(guard_index == 1, "action-reference guard is not immediately after static checkout")
+assert(static_steps[0]["uses"] == checkout, "static checkout pin changed")
+assert(
+  static_steps.take(guard_index).map { |step| step["uses"] }.compact == [checkout],
+  "an unapproved action step precedes the static guard",
+)
+assert(
+  static_steps.index { |step| step["name"] == "Download verified Nix archive" } > guard_index,
+  "archive download precedes the static guard",
+)
+assert(
+  static_steps.index { |step| step["uses"] == installer } > guard_index,
+  "Nix installer precedes the static guard",
+)
+assert(test_job["needs"] == "static", "test job is not gated by static")
+assert(test_job.fetch("steps")[0]["uses"] == checkout, "test checkout pin changed")
+
+run = static_steps.fetch(guard_index).fetch("run")
+assert(run.start_with?("set -euo pipefail\nruby <<'RUBY'\n"), "guard source wrapper changed")
+assert(run.end_with?("RUBY\n"), "guard source terminator changed")
+File.binwrite(guard_path, "#!/usr/bin/env bash\n#{run}")
+RUBY
+chmod +x "$guard_script"
+
+run_guard() {
+  local label="$1"
+  local expected_status="$2"
+  local root="$3"
+  local script="${4:-$guard_script}"
+  local output="$tmp/$label.out"
+
+  set +e
+  WORKFLOW_GUARD_ROOT="$root" "$script" >"$output" 2>&1
+  local actual_status=$?
+  set -e
+
+  if ((actual_status != expected_status)); then
+    echo "$label returned $actual_status instead of $expected_status"
+    cat "$output"
+    exit 1
+  fi
+}
+
+expect_exact_output() {
+  local label="$1"
+  local expected="$2"
+  local actual
+  actual="$(cat "$tmp/$label.out")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$label returned unexpected output"
+    cat "$tmp/$label.out"
+    exit 1
+  fi
+}
+
+write_approved_fixture() {
+  local path="$1"
+  cat >"$path" <<'YAML'
+jobs:
+  static:
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c
+      - run: "echo 'uses: evil/example@main'"
+  test:
+    steps:
+      - uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+      - "uses": "nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c"
+YAML
+}
+
+replace_first() {
+  local path="$1"
+  local replacement="$2"
+  ruby - "$path" "$replacement" <<'RUBY'
+path, replacement = ARGV
+source = File.binread(path)
+updated = source.sub(
+  "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+  replacement,
+)
+raise "fixture replacement failed" if updated == source
+File.binwrite(path, updated)
+RUBY
+}
+
+prior_guard="$tmp/prior-guard.sh"
+ruby - "$guard_script" "$prior_guard" <<'RUBY'
+source_path, output_path = ARGV
+alias_checks = 0
+mapping_key_checks = 0
+lines = File.binread(source_path).lines.each_with_object([]) do |line, output|
+  if line.include?('fail("workflow aliases are not approved")')
+    alias_checks += 1
+    replacement = alias_checks == 1 ? "return if" : "next if"
+    output << line.sub(
+      'fail("workflow aliases are not approved") if',
+      replacement,
+    )
+  elsif line.include?('fail("workflow mapping keys must be scalar")')
+    mapping_key_checks += 1
+  else
+    output << line
+  end
+end
+unless alias_checks == 2 && mapping_key_checks == 1
+  raise "workflow key guard source changed"
+end
+File.binwrite(output_path, lines.join)
+RUBY
+chmod +x "$prior_guard"
+
+fixtures="$tmp/fixtures"
+mkdir "$fixtures"
+write_approved_fixture "$fixtures/approved.yml"
+run_guard current 0 "$repo_root/.github/workflows"
+run_guard approved 0 "$fixtures"
+
+write_approved_fixture "$fixtures/approved.yml"
+replace_first "$fixtures/approved.yml" './local-action'
+run_guard local-action 1 "$fixtures"
+
+write_approved_fixture "$fixtures/approved.yml"
+replace_first "$fixtures/approved.yml" 'actions/checkout@main'
+run_guard mutable-reference 1 "$fixtures"
+
+write_approved_fixture "$fixtures/approved.yml"
+replace_first "$fixtures/approved.yml" 'docker://example/action:latest'
+run_guard docker-reference 1 "$fixtures"
+
+write_approved_fixture "$fixtures/approved.yml"
+# The fixture must retain the literal Actions expression syntax.
+# shellcheck disable=SC2016
+replace_first "$fixtures/approved.yml" '${{ github.event.action }}'
+run_guard dynamic-reference 1 "$fixtures"
+
+write_approved_fixture "$fixtures/approved.yml"
+cat >>"$fixtures/approved.yml" <<'YAML'
+alias_fixture:
+  key: &uses uses
+  *uses: evil/example@main
+YAML
+run_guard alias-key-with-prior-guard 0 "$fixtures" "$prior_guard"
+run_guard alias-key 1 "$fixtures"
+expect_exact_output alias-key '::error::workflow aliases are not approved'
+
+write_approved_fixture "$fixtures/approved.yml"
+cat >>"$fixtures/approved.yml" <<'YAML'
+non_scalar_fixture:
+  uses:
+    nested: value
+YAML
+run_guard non-scalar-value 1 "$fixtures"
+
+printf 'jobs: [unterminated\n' >"$fixtures/approved.yml"
+run_guard malformed 1 "$fixtures"
+
+printf 'workflow action-reference guard fixtures passed\n'

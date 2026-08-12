@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+require_tracked_regular_vimdoc() {
+  if ! git ls-files --error-unmatch -- doc/muster.txt >/dev/null 2>&1 \
+    || [[ ! -f doc/muster.txt ]] \
+    || [[ -L doc/muster.txt ]]; then
+    echo '::error::doc/muster.txt must be a tracked regular file and not a symlink'
+    exit 1
+  fi
+}
+
+require_tracked_regular_vimdoc
+scripts/generate-vimdoc
+require_tracked_regular_vimdoc
+
+if ! awk '
+  /^INSTALLATION AUTHORITY[[:space:]]/ {
+    section = 1
+    next
+  }
+  section && /^  Surface[[:space:]]/ {
+    table = 1
+  }
+  table && !/^  / {
+    exit
+  }
+  table {
+    rows += 1
+    if (length($0) > 78) {
+      printf "::error::generated installation-authority table exceeds tw=78 at line %d\n", NR
+      invalid = 1
+    }
+  }
+  END {
+    if (rows == 0) {
+      print "::error::generated installation-authority table was not found"
+      invalid = 1
+    }
+    exit invalid
+  }
+' doc/muster.txt; then
+  exit 1
+fi
+
+vimdoc_status=0
+if ! git diff --exit-code -- doc/muster.txt; then
+  echo '::error::generated vimdoc worktree differs from the index'
+  vimdoc_status=1
+fi
+if ! git diff --cached --exit-code HEAD -- doc/muster.txt; then
+  echo '::error::generated vimdoc index differs from HEAD'
+  vimdoc_status=1
+fi
+exit "$vimdoc_status"

@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp="$(mktemp -d)"
+unreadable_file=''
+unreadable_directory=''
+
+cleanup() {
+  if [[ -n "$unreadable_file" ]]; then
+    chmod u+rw "$unreadable_file" 2>/dev/null || true
+  fi
+  if [[ -n "$unreadable_directory" ]]; then
+    chmod u+rwx "$unreadable_directory" 2>/dev/null || true
+  fi
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+run_cli_with_wrapper() {
+  local label="$1"
+  local expected_status="$2"
+  local wrapper="$3"
+  shift 3
+
+  set +e
+  nvim --clean --headless -u NONE -i NONE \
+    -l "$wrapper" "$@" \
+    >"$tmp/$label.out" 2>&1
+  local status=$?
+  set -e
+
+  if ((status != expected_status)); then
+    echo "$label returned $status instead of $expected_status"
+    cat "$tmp/$label.out"
+    exit 1
+  fi
+}
+
+run_cli() {
+  local label="$1"
+  local expected_status="$2"
+  shift 2
+  run_cli_with_wrapper \
+    "$label" "$expected_status" "$repo_root/scripts/check-debug-calls.lua" "$@"
+}
+
+expect_exact_output() {
+  local label="$1"
+  local expected="$2"
+  local actual
+  actual="$(cat "$tmp/$label.out")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$label returned unexpected output"
+    exit 1
+  fi
+}
+
+expect_no_raw_content() {
+  local label="$1"
+  local sensitive="$2"
+  if grep -F -- "$sensitive" "$tmp/$label.out" >/dev/null; then
+    echo "$label exposed raw sensitive content"
+    exit 1
+  fi
+}
+
+expect_bootstrap_failure() {
+  local label="$1"
+  local sensitive="${2:-}"
+  expect_exact_output "$label" 'debug-call audit failed'
+  expect_no_raw_content "$label" "$tmp"
+  if [[ -n "$sensitive" ]]; then
+    expect_no_raw_content "$label" "$sensitive"
+  fi
+  if grep -Ei 'stack traceback|module .* not found|no file|package\.path' \
+    "$tmp/$label.out" >/dev/null; then
+    echo "$label exposed a module search trace"
+    exit 1
+  fi
+}
+
+make_wrapper_fixture() {
+  local label="$1"
+  local directory="$tmp/$label-wrapper"
+  mkdir "$directory"
+  cp "$repo_root/scripts/check-debug-calls.lua" "$directory/"
+}
+
+run_result_fixture() {
+  local label="$1"
+  local sensitive="$2"
+  make_wrapper_fixture "$label"
+  cat >"$tmp/$label-wrapper/debug_call_audit.lua"
+  run_cli_with_wrapper \
+    "$label" 2 \
+    "$tmp/$label-wrapper/check-debug-calls.lua" "$clean"
+  expect_bootstrap_failure "$label" "$sensitive"
+}
+
+clean="$tmp/clean.lua"
+printf 'local clean = true\n' >"$clean"
+run_cli clean 0 "$clean"
+expect_exact_output clean ''
+
+finding="$tmp/finding"$'\n''::error::injected.lua'
+cat >"$finding" <<'LUA'
+((print))("SENSITIVE_FINDING_CONTENT");
+(((vim).print))("SENSITIVE_FINDING_CONTENT");
+(vim)["print"]("SENSITIVE_FINDING_CONTENT");
+((vim))[("print")]("SENSITIVE_FINDING_CONTENT");
+vim[(("print"))]("SENSITIVE_FINDING_CONTENT");
+vim["pr\105nt"]("SENSITIVE_FINDING_CONTENT");
+vim['pr\x69nt']("SENSITIVE_FINDING_CONTENT");
+vim[("pr\z  int")]("SENSITIVE_FINDING_CONTENT");
+LUA
+run_cli finding 1 "$finding"
+sanitized_finding="${finding//$'\n'/\\x0a}"
+expect_exact_output finding "debug-call finding: $sanitized_finding:1: print()
+debug-call finding: $sanitized_finding:2: vim.print()
+debug-call finding: $sanitized_finding:3: vim.print()
+debug-call finding: $sanitized_finding:4: vim.print()
+debug-call finding: $sanitized_finding:5: vim.print()
+debug-call finding: $sanitized_finding:6: vim.print()
+debug-call finding: $sanitized_finding:7: vim.print()
+debug-call finding: $sanitized_finding:8: vim.print()
+debug-call audit failed: leftover debug calls found"
+expect_no_raw_content finding SENSITIVE_FINDING_CONTENT
+if grep -Eq '^::(error|warning|notice)::' "$tmp/finding.out"; then
+  echo 'finding output allowed workflow-command injection'
+  exit 1
+fi
+
+negative="$tmp/negative.lua"
+cat >"$negative" <<'LUA'
+((logger).print)("other object")
+((vim).other)("other key")
+(vim):print("method")
+vim[("pr\110nt")]("escaped other key")
+other[("print")]("parenthesized other object")
+local key = "print"
+vim[key]("dynamic key")
+vim[("pr" .. "int")]("computed key")
+LUA
+run_cli negative 0 "$negative"
+expect_exact_output negative ''
+
+malformed="$tmp/SENSITIVE_MALFORMED_PATH.lua"
+printf 'local SENSITIVE_MALFORMED_CONTENT =\n' >"$malformed"
+run_cli malformed 2 "$malformed"
+expect_exact_output malformed 'debug-call audit failed'
+expect_no_raw_content malformed SENSITIVE_MALFORMED
+
+missing="$tmp/SENSITIVE_MISSING_PATH.lua"
+run_cli missing 2 "$missing"
+expect_exact_output missing 'debug-call audit failed'
+expect_no_raw_content missing SENSITIVE_MISSING
+
+unreadable_file="$tmp/SENSITIVE_UNREADABLE_PATH.lua"
+printf 'local SENSITIVE_UNREADABLE_CONTENT = true\n' >"$unreadable_file"
+chmod 000 "$unreadable_file"
+run_cli unreadable 2 "$unreadable_file"
+expect_exact_output unreadable 'debug-call audit failed'
+expect_no_raw_content unreadable SENSITIVE_UNREADABLE
+chmod u+rw "$unreadable_file"
+unreadable_file=''
+
+symlink="$tmp/SENSITIVE_SYMLINK_PATH.lua"
+ln -s "$clean" "$symlink"
+run_cli symlink 2 "$symlink"
+expect_exact_output symlink 'debug-call audit failed'
+expect_no_raw_content symlink SENSITIVE_SYMLINK
+
+unreadable_directory="$tmp/SENSITIVE_ENUMERATION_PATH"
+mkdir "$unreadable_directory"
+printf 'local SENSITIVE_ENUMERATION_CONTENT = true\n' \
+  >"$unreadable_directory/fixture.lua"
+chmod 000 "$unreadable_directory"
+run_cli enumeration 2 "$unreadable_directory"
+expect_exact_output enumeration 'debug-call audit failed'
+expect_no_raw_content enumeration SENSITIVE_ENUMERATION
+chmod u+rwx "$unreadable_directory"
+unreadable_directory=''
+
+run_cli no-arg 2
+expect_exact_output no-arg 'debug-call audit failed'
+
+make_wrapper_fixture missing-module
+run_cli_with_wrapper \
+  bootstrap-missing-module 2 \
+  "$tmp/missing-module-wrapper/check-debug-calls.lua" "$clean"
+expect_bootstrap_failure bootstrap-missing-module
+
+make_wrapper_fixture syntax-module
+printf 'local SENSITIVE_SYNTAX_MODULE_SECRET =\n' \
+  >"$tmp/syntax-module-wrapper/debug_call_audit.lua"
+run_cli_with_wrapper \
+  bootstrap-syntax-module 2 \
+  "$tmp/syntax-module-wrapper/check-debug-calls.lua" "$clean"
+expect_bootstrap_failure \
+  bootstrap-syntax-module SENSITIVE_SYNTAX_MODULE_SECRET
+
+make_wrapper_fixture top-level-module
+cat >"$tmp/top-level-module-wrapper/debug_call_audit.lua" <<'LUA'
+error("SENSITIVE_TOP_LEVEL_MODULE_SECRET")
+LUA
+run_cli_with_wrapper \
+  bootstrap-top-level-module 2 \
+  "$tmp/top-level-module-wrapper/check-debug-calls.lua" "$clean"
+expect_bootstrap_failure \
+  bootstrap-top-level-module SENSITIVE_TOP_LEVEL_MODULE_SECRET
+
+make_wrapper_fixture malformed-module
+cat >"$tmp/malformed-module-wrapper/debug_call_audit.lua" <<'LUA'
+return "SENSITIVE_MALFORMED_MODULE_SECRET"
+LUA
+run_cli_with_wrapper \
+  bootstrap-malformed-module 2 \
+  "$tmp/malformed-module-wrapper/check-debug-calls.lua" "$clean"
+expect_bootstrap_failure \
+  bootstrap-malformed-module SENSITIVE_MALFORMED_MODULE_SECRET
+
+make_wrapper_fixture missing-scan
+cat >"$tmp/missing-scan-wrapper/debug_call_audit.lua" <<'LUA'
+return { secret = "SENSITIVE_MISSING_SCAN_SECRET" }
+LUA
+run_cli_with_wrapper \
+  bootstrap-missing-scan 2 \
+  "$tmp/missing-scan-wrapper/check-debug-calls.lua" "$clean"
+expect_bootstrap_failure bootstrap-missing-scan SENSITIVE_MISSING_SCAN_SECRET
+
+run_result_fixture map-result SENSITIVE_MAP_RESULT <<'LUA'
+return {
+  scan = function()
+    return {
+      path = "SENSITIVE_MAP_RESULT",
+      line = 1,
+      kind = "print",
+    }
+  end,
+}
+LUA
+
+run_result_fixture sparse-result SENSITIVE_SPARSE_RESULT <<'LUA'
+return {
+  scan = function()
+    return {
+      [1] = { path = "SENSITIVE_SPARSE_RESULT", line = 1, kind = "print" },
+      [3] = { path = "SENSITIVE_SPARSE_RESULT", line = 3, kind = "vim.print" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture result-metatable SENSITIVE_RESULT_METATABLE <<'LUA'
+return {
+  scan = function()
+    return setmetatable({
+      { path = "SENSITIVE_RESULT_METATABLE", line = 1, kind = "print" },
+    }, {
+      __len = function()
+        error("SENSITIVE_RESULT_METATABLE")
+      end,
+      __pairs = function()
+        error("SENSITIVE_RESULT_METATABLE")
+      end,
+    })
+  end,
+}
+LUA
+
+run_result_fixture non-table-entry SENSITIVE_NON_TABLE_ENTRY <<'LUA'
+return {
+  scan = function()
+    return { "SENSITIVE_NON_TABLE_ENTRY" }
+  end,
+}
+LUA
+
+run_result_fixture empty-path SENSITIVE_EMPTY_PATH <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = "", line = 1, kind = "print", secret = "SENSITIVE_EMPTY_PATH" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture non-string-path SENSITIVE_NON_STRING_PATH <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = { secret = "SENSITIVE_NON_STRING_PATH" }, line = 1, kind = "print" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture zero-line SENSITIVE_ZERO_LINE <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = "SENSITIVE_ZERO_LINE", line = 0, kind = "print" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture fractional-line SENSITIVE_FRACTIONAL_LINE <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = "SENSITIVE_FRACTIONAL_LINE", line = 1.5, kind = "print" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture non-number-line SENSITIVE_NON_NUMBER_LINE <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = "SENSITIVE_NON_NUMBER_LINE", line = "1", kind = "print" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture invalid-kind SENSITIVE_INVALID_KIND <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = "fixture.lua", line = 1, kind = "SENSITIVE_INVALID_KIND" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture control-kind SENSITIVE_CONTROL_KIND <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = "fixture.lua", line = 1, kind = "print\0SENSITIVE_CONTROL_KIND" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture newline-kind SENSITIVE_NEWLINE_KIND <<'LUA'
+return {
+  scan = function()
+    return {
+      { path = "fixture.lua", line = 1, kind = "print\n::error::SENSITIVE_NEWLINE_KIND" },
+    }
+  end,
+}
+LUA
+
+run_result_fixture entry-metatable SENSITIVE_ENTRY_METATABLE <<'LUA'
+return {
+  scan = function()
+    local finding = setmetatable({}, {
+      __index = function()
+        error("SENSITIVE_ENTRY_METATABLE")
+      end,
+    })
+    return { finding }
+  end,
+}
+LUA
+
+run_result_fixture throwing-field-access SENSITIVE_THROWING_FIELD_ACCESS <<'LUA'
+return {
+  scan = function()
+    local finding = setmetatable({}, {
+      __index = function()
+        error("SENSITIVE_THROWING_FIELD_ACCESS")
+      end,
+    })
+    _G.getmetatable = function()
+      return nil
+    end
+    return { finding }
+  end,
+}
+LUA
+
+printf 'debug-call CLI fixtures passed\n'

@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+workflow="$repo_root/.github/workflows/ci.yml"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+safe_prefix='nix --option accept-flake-config false --option netrc-file /dev/null'
+set +e
+ruby - "$workflow" "${BASH_SOURCE[0]}" "$safe_prefix" >/dev/null 2>&1 <<'RUBY'
+require "psych"
+
+workflow_path, fixture_path, safe_prefix = ARGV
+workflow = Psych.safe_load(File.binread(workflow_path), aliases: false)
+installer = [
+  "nixbuild/nix-quick-install-action",
+  "9f63be77f412a248c9d9a65a4c82cf066cdf8f0c",
+].join("@")
+command_pattern = /\bnix(?=\s)/
+command_count = 0
+
+workflow.fetch("jobs").each do |job_name, job|
+  steps = job.fetch("steps")
+  installer_index = steps.index { |step| step["uses"] == installer }
+  raise "missing installer in #{job_name}" unless installer_index
+
+  steps.drop(installer_index + 1).each do |step|
+    run = step["run"]
+    next unless run
+
+    run.enum_for(:scan, command_pattern).each do
+      command_count += 1
+      offset = Regexp.last_match.begin(0)
+      unless run.byteslice(offset, safe_prefix.bytesize) == safe_prefix
+        raise "unprotected post-install Nix command"
+      end
+    end
+  end
+end
+raise "no post-install Nix commands found" if command_count.zero?
+
+fixture_source = File.binread(fixture_path)
+fixture_source.enum_for(:scan, command_pattern).each do
+  offset = Regexp.last_match.begin(0)
+  unless fixture_source.byteslice(offset, safe_prefix.bytesize) == safe_prefix
+    raise "unprotected fixture Nix command"
+  end
+end
+RUBY
+source_status=$?
+set -e
+if ((source_status != 0)); then
+  echo 'Nix option source assertion failed'
+  exit 1
+fi
+
+secret_path="$tmp/SENSITIVE_NETRC_PATH"
+secret_value='SENSITIVE_NETRC_CONTENT'
+printf 'machine github.com login fixture password %s\n' "$secret_value" >"$secret_path"
+query_output="$tmp/query.out"
+
+set +e
+NIX_CONFIG="netrc-file = $secret_path" \
+  nix --option accept-flake-config false --option netrc-file /dev/null \
+  config show netrc-file >"$query_output" 2>&1
+query_status=$?
+set -e
+if ((query_status != 0)); then
+  echo 'effective Nix netrc-file audit failed'
+  exit 1
+fi
+
+if [[ "$(cat "$query_output")" != /dev/null ]]; then
+  echo 'effective Nix netrc-file is not disabled'
+  exit 1
+fi
+if grep -F -- "$secret_path" "$query_output" >/dev/null ||
+  grep -F -- "$secret_value" "$query_output" >/dev/null; then
+  echo 'effective Nix netrc-file audit exposed configured credentials'
+  exit 1
+fi
+
+printf 'Nix netrc-file override fixtures passed\n'

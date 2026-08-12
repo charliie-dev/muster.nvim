@@ -5,64 +5,617 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: busted (Neovim ${{ matrix.neovim }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # muster targets the latest stable Neovim and does not carry version
-        # fallbacks; nightly runs alongside it as an early warning, not a gate.
-        neovim: [v0.12.0, nightly]
+  static:
+    name: static verification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Run specs
-        uses: lumen-oss/nvim-busted-action@v1
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          nvim_version: ${{ matrix.neovim }}
-    continue-on-error: ${{ matrix.neovim == 'nightly' }}
+          persist-credentials: false
+          fetch-depth: 0
 
-  stylua:
-    name: stylua
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: JohnnyMorganz/stylua-action@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          version: latest
-          args: --check lua plugin spec
-
-  selene:
-    name: selene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: NTBBloodbath/selene-action@v1.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: --display-style=quiet lua plugin spec
-
-  typecheck:
-    name: lua-language-server
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: mrcjkb/lua-typecheck-action@v0
-        with:
-          directories: lua
-
-  debug-statements:
-    name: no leftover debug calls
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Reject stray print/vim.print
+      - name: Reject unapproved action references
+        shell: bash
         run: |
-          # muster reports through vim.notify and vim.health; a bare print in
-          # library code is always a leftover.
-          if grep -rnE '(^|[^%.a-zA-Z_])(vim\.)?print\(' lua/ plugin/; then
-            echo "::error::leftover debug print() found"
+          set -euo pipefail
+          ruby <<'RUBY'
+          require "psych"
+
+          def fail(message)
+            warn "::error::#{message}"
+            exit 1
+          end
+
+          root = ENV.fetch("WORKFLOW_GUARD_ROOT", ".github/workflows")
+          begin
+            workflow_files = Dir.children(root)
+              .select { |entry| [".yml", ".yaml"].include?(File.extname(entry)) }
+              .sort
+              .map { |entry| File.join(root, entry) }
+          rescue StandardError
+            fail("cannot enumerate workflow files")
+          end
+          fail("no workflow files found") if workflow_files.empty?
+
+          uses_values = []
+          walk = nil
+          walk = lambda do |node|
+            fail("workflow aliases are not approved") if node.is_a?(Psych::Nodes::Alias)
+            if node.is_a?(Psych::Nodes::Mapping)
+              fail("invalid workflow mapping") if node.children.length.odd?
+              node.children.each_slice(2) do |key, value|
+                fail("workflow aliases are not approved") if key.is_a?(Psych::Nodes::Alias)
+                fail("workflow mapping keys must be scalar") unless key.is_a?(Psych::Nodes::Scalar)
+                if key.value == "uses"
+                  unless value.is_a?(Psych::Nodes::Scalar) && value.value.is_a?(String)
+                    fail("uses value must be a scalar string")
+                  end
+                  uses_values << value.value
+                end
+                walk.call(key)
+                walk.call(value)
+              end
+            elsif node.respond_to?(:children) && node.children
+              node.children.each { |child| walk.call(child) }
+            end
+          end
+
+          workflow_files.each do |path|
+            begin
+              ast = Psych.parse_stream(File.binread(path))
+              walk.call(ast)
+            rescue StandardError
+              fail("cannot parse or inspect workflow file")
+            end
+          end
+
+          checkout = [
+            "actions/checkout",
+            "3d3c42e5aac5ba805825da76410c181273ba90b1",
+          ].join("@")
+          installer = [
+            "nixbuild/nix-quick-install-action",
+            "9f63be77f412a248c9d9a65a4c82cf066cdf8f0c",
+          ].join("@")
+          expected = { checkout => 2, installer => 2 }
+          actual = Hash.new(0)
+
+          expression_prefix = "$" + "{{"
+          uses_values.each do |target|
+            fail("dynamic action references are not approved") if target.include?(expression_prefix)
+            fail("Docker action references are not approved") if target.downcase.start_with?("docker://")
+            fail("local action references are not approved") if target.start_with?("./")
+            fail("remote action reference is not approved") unless expected.key?(target)
+            actual[target] += 1
+          end
+          fail("workflow action references do not match the approved allowlist") unless actual == expected
+          RUBY
+
+      - name: Download verified Nix archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_dir="$RUNNER_TEMP/nix-archives"
+          archive="$archive_dir/nix-2.34.7-x86_64-linux.tar.zstd"
+          mkdir -p "$archive_dir"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --output "$archive" \
+            'https://github.com/nixbuild/nix-quick-install-action/releases/download/v35/nix-2.34.7-x86_64-linux.tar.zstd'
+          printf '%s  %s\n' \
+            'f1e5d42c9cf1494a2bd020e42bf5345cc25168f9ec3ced3ed77e6b688c66054a' \
+            "$archive" | sha256sum --check --strict
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: "2.34.7"
+          github_access_token: ""
+          enable_kvm: false
+          nix_on_tmpfs: false
+          nix_archives_url: file://${{ runner.temp }}/nix-archives
+
+      - name: Harden Nix and credential configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${NIX_CONFIG+x}" || -n "${NIX_USER_CONF_FILES+x}" ]]; then
+            echo '::error::unexpected Nix configuration environment override'
+            exit 1
+          fi
+
+          user_nix_conf="${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf"
+          if [[ ! -f "$user_nix_conf" ]]; then
+            echo '::error::installer-created user nix.conf is missing'
+            exit 1
+          fi
+          set +e
+          grep -Eq '^[[:space:]]*!?include([[:space:]]|$)' "$user_nix_conf" >/dev/null 2>&1
+          include_status=$?
+          set -e
+          case "$include_status" in
+            0)
+              echo '::error::user nix.conf contains an active include directive'
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo '::error::user nix.conf include audit failed'
+              exit 1
+              ;;
+          esac
+
+          set +e
+          true_count="$(grep -Ec '^[[:space:]]*accept-flake-config[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$' "$user_nix_conf" 2>/dev/null)"
+          true_count_status=$?
+          set -e
+          case "$true_count_status" in
+            0|1) ;;
+            *)
+              echo '::error::user nix.conf accept-flake-config line audit failed'
+              exit 1
+              ;;
+          esac
+          if [[ "$true_count" != 1 ]]; then
+            echo '::error::user nix.conf does not contain exactly one expected active accept-flake-config line'
+            exit 1
+          fi
+          sed -E -i 's/^([[:space:]]*accept-flake-config[[:space:]]*=[[:space:]]*)true([[:space:]]*(#.*)?)$/\1false\2/' "$user_nix_conf"
+          set +e
+          grep -Eq '^[[:space:]]*accept-flake-config[[:space:]]*=[[:space:]]*true([[:space:]]|$)' "$user_nix_conf" >/dev/null 2>&1
+          remaining_true_status=$?
+          set -e
+          case "$remaining_true_status" in
+            0)
+              echo '::error::accept-flake-config remains enabled'
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo '::error::accept-flake-config post-edit audit failed'
+              exit 1
+              ;;
+          esac
+          set +e
+          accept_flake_config="$(nix --option accept-flake-config false --option netrc-file /dev/null config show accept-flake-config 2>/dev/null)"
+          accept_flake_config_status=$?
+          set -e
+          if (( accept_flake_config_status != 0 )); then
+            echo '::error::effective accept-flake-config audit failed'
+            exit 1
+          fi
+          if [[ "$accept_flake_config" != false ]]; then
+            echo '::error::effective accept-flake-config is not false'
+            exit 1
+          fi
+
+          set +e
+          access_tokens="$(nix --option accept-flake-config false --option netrc-file /dev/null config show access-tokens 2>/dev/null)"
+          access_tokens_status=$?
+          set -e
+          if (( access_tokens_status != 0 )); then
+            echo '::error::effective Nix access-token audit failed'
+            exit 1
+          fi
+          if [[ -n "$access_tokens" ]]; then
+            echo '::error::effective Nix access tokens are present'
+            exit 1
+          fi
+
+          set +e
+          netrc_file="$(nix --option accept-flake-config false --option netrc-file /dev/null config show netrc-file 2>/dev/null)"
+          netrc_file_status=$?
+          set -e
+          if (( netrc_file_status != 0 )); then
+            echo '::error::effective Nix netrc-file audit failed'
+            exit 1
+          fi
+          if [[ "$netrc_file" != /dev/null ]]; then
+            echo '::error::effective Nix netrc-file is not disabled'
+            exit 1
+          fi
+
+          if [[ -e "$HOME/.netrc" || -L "$HOME/.netrc" ]]; then
+            if [[ ! -r "$HOME/.netrc" ]]; then
+              echo '::error::.netrc exists but is not readable'
+              exit 1
+            fi
+            set +e
+            python3 - "$HOME/.netrc" >/dev/null 2>&1 <<'PYTHON'
+          import netrc
+          import sys
+
+          try:
+              parsed = netrc.netrc(sys.argv[1])
+              github_hosts = {"github.com", "api.github.com"}
+              github_credentials = any(
+                  host.casefold() in github_hosts for host in parsed.hosts
+              )
+              default_credentials = "default" in parsed.hosts
+              applicable_credentials = any(
+                  parsed.authenticators(host) is not None for host in github_hosts
+              )
+          except BaseException:
+              raise SystemExit(11)
+          raise SystemExit(
+              10
+              if github_credentials or default_credentials or applicable_credentials
+              else 0
+          )
+          PYTHON
+            netrc_status=$?
+            set -e
+            case "$netrc_status" in
+              0) ;;
+              10)
+                echo '::error::GitHub credentials are present in .netrc'
+                exit 1
+                ;;
+              *)
+                echo '::error::.netrc credential audit failed'
+                exit 1
+                ;;
+            esac
+          fi
+
+          set +e
+          git config --show-origin --get-regexp '^http(\..*)?\.extraheader$' >/dev/null 2>&1
+          git_config_status=$?
+          set -e
+          case "$git_config_status" in
+            0)
+              echo '::error::effective Git HTTP extraheader is present'
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo '::error::effective Git credential audit failed'
+              exit 1
+              ;;
+          esac
+
+      - name: Test Nix credential boundary
+        run: scripts/test-nix-netrc-override
+
+      - name: Evaluate all development shells
+        run: nix --option accept-flake-config false --option netrc-file /dev/null flake check --all-systems --no-build
+
+      - name: Validate workflow
+        run: nix --option accept-flake-config false --option netrc-file /dev/null develop --command actionlint .github/workflows/ci.yml
+
+      - name: Test action-reference guard
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          scripts/test-workflow-action-guard
+
+      - name: Test documentation gate
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          scripts/test-vimdoc-gate
+
+      - name: Regenerate documentation
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          scripts/check-vimdoc
+
+      - name: Verify Vim help
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/doc"
+          cp doc/muster.txt "$tmp/doc/"
+          # TMP_RTP expands inside Neovim, not in this shell.
+          # shellcheck disable=SC2016
+          TMP_RTP="$tmp" nix --option accept-flake-config false --option netrc-file /dev/null develop --command \
+            nvim --clean --headless -i NONE \
+              --cmd 'set loadplugins' \
+              --cmd 'execute "set runtimepath^=" .. fnameescape($TMP_RTP)' \
+              -c 'lua local ok = pcall(function() vim.cmd("helptags " .. vim.fn.fnameescape(vim.env.TMP_RTP .. "/doc")); vim.cmd("help muster"); local path = vim.api.nvim_buf_get_name(0); assert(vim.endswith(path, "/doc/muster.txt")) end); if not ok then vim.api.nvim_err_writeln("::error::Vim help verification failed"); vim.cmd("cquit") else vim.cmd("qa!") end'
+          test ! -e doc/tags
+
+      - name: Run ShellCheck
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          shellcheck scripts/check-vimdoc scripts/generate-vimdoc
+          scripts/test-vimdoc-gate scripts/test-workflow-action-guard
+          scripts/test-nix-netrc-override scripts/test-debug-call-cli scripts/typecheck
+
+      - name: Run StyLua
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          stylua --check lua plugin spec scripts/check-debug-calls.lua
+          scripts/debug_call_audit.lua scripts/test-debug-call-audit.lua
+
+      - name: Run Selene
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          selene lua plugin spec scripts/check-debug-calls.lua
+          scripts/debug_call_audit.lua scripts/test-debug-call-audit.lua
+
+      - name: Run LuaLS
+        run: nix --option accept-flake-config false --option netrc-file /dev/null develop --command scripts/typecheck
+
+      - name: Test debug-call audit
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          nvim --clean --headless -u NONE -i NONE
+          -l scripts/test-debug-call-audit.lua
+
+      - name: Test debug-call audit CLI
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          scripts/test-debug-call-cli
+
+      - name: Reject debug calls
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          nvim --clean --headless -u NONE -i NONE
+          -l scripts/check-debug-calls.lua lua plugin
+
+      - name: Check committed whitespace
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          sha_pattern='^[0-9a-fA-F]{40}$'
+          zero_sha='0000000000000000000000000000000000000000'
+          head_sha="${GITHUB_SHA:-}"
+
+          if [[ ! "$head_sha" =~ $sha_pattern ]]; then
+            echo '::error::invalid workflow head SHA'
+            exit 1
+          fi
+          if ! git cat-file -e "${head_sha}^{commit}" 2>/dev/null; then
+            echo '::error::workflow head commit is unavailable'
+            exit 1
+          fi
+
+          case "${GITHUB_EVENT_NAME:-}" in
+            pull_request)
+              base_sha="$PR_BASE_SHA"
+              ;;
+            push)
+              base_sha="$PUSH_BEFORE_SHA"
+              if [[ ! "$base_sha" =~ $sha_pattern ]]; then
+                echo '::error::invalid push before SHA'
+                exit 1
+              fi
+              if [[ "$base_sha" == "$zero_sha" ]]; then
+                base_sha="$(git hash-object -w -t tree /dev/null)"
+              fi
+              ;;
+            *)
+              echo '::error::unsupported workflow event for whitespace audit'
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$base_sha" =~ $sha_pattern ]]; then
+            echo '::error::invalid workflow base SHA'
+            exit 1
+          fi
+          if ! git cat-file -e "${base_sha}^{tree}" 2>/dev/null; then
+            echo '::error::workflow base is unavailable'
+            exit 1
+          fi
+          git diff --check "$base_sha" "$head_sha"
+
+  test:
+    name: test suite
+    needs: static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download verified Nix archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_dir="$RUNNER_TEMP/nix-archives"
+          archive="$archive_dir/nix-2.34.7-x86_64-linux.tar.zstd"
+          mkdir -p "$archive_dir"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --output "$archive" \
+            'https://github.com/nixbuild/nix-quick-install-action/releases/download/v35/nix-2.34.7-x86_64-linux.tar.zstd'
+          printf '%s  %s\n' \
+            'f1e5d42c9cf1494a2bd020e42bf5345cc25168f9ec3ced3ed77e6b688c66054a' \
+            "$archive" | sha256sum --check --strict
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: "2.34.7"
+          github_access_token: ""
+          enable_kvm: false
+          nix_on_tmpfs: false
+          nix_archives_url: file://${{ runner.temp }}/nix-archives
+
+      - name: Harden Nix and credential configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${NIX_CONFIG+x}" || -n "${NIX_USER_CONF_FILES+x}" ]]; then
+            echo '::error::unexpected Nix configuration environment override'
+            exit 1
+          fi
+
+          user_nix_conf="${XDG_CONFIG_HOME:-$HOME/.config}/nix/nix.conf"
+          if [[ ! -f "$user_nix_conf" ]]; then
+            echo '::error::installer-created user nix.conf is missing'
+            exit 1
+          fi
+          set +e
+          grep -Eq '^[[:space:]]*!?include([[:space:]]|$)' "$user_nix_conf" >/dev/null 2>&1
+          include_status=$?
+          set -e
+          case "$include_status" in
+            0)
+              echo '::error::user nix.conf contains an active include directive'
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo '::error::user nix.conf include audit failed'
+              exit 1
+              ;;
+          esac
+
+          set +e
+          true_count="$(grep -Ec '^[[:space:]]*accept-flake-config[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$' "$user_nix_conf" 2>/dev/null)"
+          true_count_status=$?
+          set -e
+          case "$true_count_status" in
+            0|1) ;;
+            *)
+              echo '::error::user nix.conf accept-flake-config line audit failed'
+              exit 1
+              ;;
+          esac
+          if [[ "$true_count" != 1 ]]; then
+            echo '::error::user nix.conf does not contain exactly one expected active accept-flake-config line'
+            exit 1
+          fi
+          sed -E -i 's/^([[:space:]]*accept-flake-config[[:space:]]*=[[:space:]]*)true([[:space:]]*(#.*)?)$/\1false\2/' "$user_nix_conf"
+          set +e
+          grep -Eq '^[[:space:]]*accept-flake-config[[:space:]]*=[[:space:]]*true([[:space:]]|$)' "$user_nix_conf" >/dev/null 2>&1
+          remaining_true_status=$?
+          set -e
+          case "$remaining_true_status" in
+            0)
+              echo '::error::accept-flake-config remains enabled'
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo '::error::accept-flake-config post-edit audit failed'
+              exit 1
+              ;;
+          esac
+          set +e
+          accept_flake_config="$(nix --option accept-flake-config false --option netrc-file /dev/null config show accept-flake-config 2>/dev/null)"
+          accept_flake_config_status=$?
+          set -e
+          if (( accept_flake_config_status != 0 )); then
+            echo '::error::effective accept-flake-config audit failed'
+            exit 1
+          fi
+          if [[ "$accept_flake_config" != false ]]; then
+            echo '::error::effective accept-flake-config is not false'
+            exit 1
+          fi
+
+          set +e
+          access_tokens="$(nix --option accept-flake-config false --option netrc-file /dev/null config show access-tokens 2>/dev/null)"
+          access_tokens_status=$?
+          set -e
+          if (( access_tokens_status != 0 )); then
+            echo '::error::effective Nix access-token audit failed'
+            exit 1
+          fi
+          if [[ -n "$access_tokens" ]]; then
+            echo '::error::effective Nix access tokens are present'
+            exit 1
+          fi
+
+          set +e
+          netrc_file="$(nix --option accept-flake-config false --option netrc-file /dev/null config show netrc-file 2>/dev/null)"
+          netrc_file_status=$?
+          set -e
+          if (( netrc_file_status != 0 )); then
+            echo '::error::effective Nix netrc-file audit failed'
+            exit 1
+          fi
+          if [[ "$netrc_file" != /dev/null ]]; then
+            echo '::error::effective Nix netrc-file is not disabled'
+            exit 1
+          fi
+
+          if [[ -e "$HOME/.netrc" || -L "$HOME/.netrc" ]]; then
+            if [[ ! -r "$HOME/.netrc" ]]; then
+              echo '::error::.netrc exists but is not readable'
+              exit 1
+            fi
+            set +e
+            python3 - "$HOME/.netrc" >/dev/null 2>&1 <<'PYTHON'
+          import netrc
+          import sys
+
+          try:
+              parsed = netrc.netrc(sys.argv[1])
+              github_hosts = {"github.com", "api.github.com"}
+              github_credentials = any(
+                  host.casefold() in github_hosts for host in parsed.hosts
+              )
+              default_credentials = "default" in parsed.hosts
+              applicable_credentials = any(
+                  parsed.authenticators(host) is not None for host in github_hosts
+              )
+          except BaseException:
+              raise SystemExit(11)
+          raise SystemExit(
+              10
+              if github_credentials or default_credentials or applicable_credentials
+              else 0
+          )
+          PYTHON
+            netrc_status=$?
+            set -e
+            case "$netrc_status" in
+              0) ;;
+              10)
+                echo '::error::GitHub credentials are present in .netrc'
+                exit 1
+                ;;
+              *)
+                echo '::error::.netrc credential audit failed'
+                exit 1
+                ;;
+            esac
+          fi
+
+          set +e
+          git config --show-origin --get-regexp '^http(\..*)?\.extraheader$' >/dev/null 2>&1
+          git_config_status=$?
+          set -e
+          case "$git_config_status" in
+            0)
+              echo '::error::effective Git HTTP extraheader is present'
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo '::error::effective Git credential audit failed'
+              exit 1
+              ;;
+          esac
+
+      - name: Run full test suite
+        run: nix --option accept-flake-config false --option netrc-file /dev/null develop --command busted
+
+      - name: Assert clean tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(git status --porcelain)"
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status"
+            echo '::error::test job changed the working tree'
             exit 1
           fi
