@@ -5,7 +5,54 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 mkdir -p doc
 
-panvimdoc \
+panvimdoc_override="${PANVIMDOC_SCRIPTS_DIR:-}"
+panvimdoc_docker_marker="${PANVIMDOC_DOCKER_MARKER:-/.dockerenv}"
+panvimdoc_in_docker=false
+if [[ -f "$panvimdoc_docker_marker" ]]; then
+  panvimdoc_in_docker=true
+  if [[ -n "$panvimdoc_override" && "$panvimdoc_override" != /scripts ]]; then
+    echo '::error::PANVIMDOC_SCRIPTS_DIR must be /scripts in Docker' >&2
+    exit 1
+  fi
+  panvimdoc_docker_root="$(dirname -- "$panvimdoc_docker_marker")"
+  if [[ ! -d "$panvimdoc_docker_root/scripts" ]]; then
+    echo '::error::panvimdoc Docker action layout requires /scripts' >&2
+    exit 1
+  fi
+  panvimdoc_scripts_dir=/scripts
+fi
+
+if ! panvimdoc_path="$(command -v panvimdoc)" || [[ -z "$panvimdoc_path" ]]; then
+  echo '::error::panvimdoc executable not found' >&2
+  exit 1
+fi
+if ! panvimdoc_executable="$(realpath -- "$panvimdoc_path")"; then
+  echo '::error::panvimdoc executable could not be resolved' >&2
+  exit 1
+fi
+
+if [[ "$panvimdoc_in_docker" == false ]]; then
+  if [[ -n "$panvimdoc_override" ]]; then
+    if [[ ! -d "$panvimdoc_override" ]]; then
+      echo '::error::PANVIMDOC_SCRIPTS_DIR is not a directory' >&2
+      exit 1
+    fi
+    panvimdoc_scripts_dir="$panvimdoc_override"
+  else
+    panvimdoc_prefix="$(dirname -- "$(dirname -- "$panvimdoc_executable")")"
+    if [[ -d "$panvimdoc_prefix/share/scripts" ]]; then
+      panvimdoc_scripts_dir="$panvimdoc_prefix/share/scripts"
+    elif [[ -d /scripts ]]; then
+      panvimdoc_scripts_dir=/scripts
+    else
+      echo '::error::panvimdoc scripts directory not found' >&2
+      exit 1
+    fi
+  fi
+fi
+
+GITHUB_ACTIONS=false "$panvimdoc_executable" \
+  --scripts-dir "$panvimdoc_scripts_dir" \
   --project-name muster \
   --input-file README.md \
   --vim-version "NVIM v0.12+" \

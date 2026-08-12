@@ -100,6 +100,156 @@ restore_fixture() {
   fi
 }
 
+assert_generator_args() {
+  local label="$1"
+  local actual="$2"
+  local scripts_dir="$3"
+  cat >"$tmp/$label.expected" <<EOF
+--scripts-dir
+$scripts_dir
+--project-name
+muster
+--input-file
+README.md
+--vim-version
+NVIM v0.12+
+--toc
+true
+--description
+Call the roll on tools your Neovim config declares
+--dedup-subheadings
+true
+--demojify
+true
+--treesitter
+true
+--ignore-rawblocks
+true
+--doc-mapping
+false
+--doc-mapping-project-name
+true
+--shift-heading-level-by
+0
+--increment-heading-level-by
+0
+EOF
+  if ! diff -u "$tmp/$label.expected" "$actual"; then
+    echo "$label did not preserve the expected generator arguments"
+    exit 1
+  fi
+}
+
+generator_fixture="$tmp/generator"
+panvimdoc_prefix="$generator_fixture/prefix"
+panvimdoc_profile="$generator_fixture/profile"
+mkdir -p "$generator_fixture/scripts" "$panvimdoc_prefix/bin" \
+  "$panvimdoc_prefix/share/scripts" "$panvimdoc_profile/bin"
+cp "$repo_root/scripts/generate-vimdoc" "$generator_fixture/scripts/generate-vimdoc"
+cat >"$panvimdoc_prefix/bin/panvimdoc" <<'PANVIMDOC'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${GITHUB_ACTIONS:-false}" == true ]]; then
+  echo 'mock panvimdoc inherited GITHUB_ACTIONS=true' >&2
+  exit 1
+fi
+printf '%s\n' "$@" >"$PANVIMDOC_ARGS_FILE"
+PANVIMDOC
+chmod +x "$generator_fixture/scripts/generate-vimdoc" \
+  "$panvimdoc_prefix/bin/panvimdoc"
+ln -s "$panvimdoc_prefix/bin/panvimdoc" "$panvimdoc_profile/bin/panvimdoc"
+non_docker_marker="$generator_fixture/non-docker"
+docker_root="$generator_fixture/docker-root"
+docker_marker="$docker_root/.dockerenv"
+mkdir -p "$docker_root"
+: >"$docker_marker"
+
+resolved_args="$tmp/resolved-args"
+GITHUB_ACTIONS=true \
+  PANVIMDOC_DOCKER_MARKER="$non_docker_marker" \
+  PANVIMDOC_SCRIPTS_DIR='' \
+  PANVIMDOC_ARGS_FILE="$resolved_args" \
+  PATH="$panvimdoc_profile/bin:$PATH" \
+  "$generator_fixture/scripts/generate-vimdoc"
+resolved_scripts="$(realpath -- "$panvimdoc_prefix/share/scripts")"
+assert_generator_args resolved "$resolved_args" "$resolved_scripts"
+
+override_scripts="$generator_fixture/override-scripts"
+override_args="$tmp/override-args"
+mkdir -p "$override_scripts"
+GITHUB_ACTIONS=true \
+  PANVIMDOC_DOCKER_MARKER="$non_docker_marker" \
+  PANVIMDOC_SCRIPTS_DIR="$override_scripts" \
+  PANVIMDOC_ARGS_FILE="$override_args" \
+  PATH="$panvimdoc_profile/bin:$PATH" \
+  "$generator_fixture/scripts/generate-vimdoc"
+assert_generator_args override "$override_args" "$override_scripts"
+
+invalid_output="$tmp/invalid-override.out"
+invalid_args="$tmp/invalid-override.args"
+if GITHUB_ACTIONS=true \
+  PANVIMDOC_DOCKER_MARKER="$non_docker_marker" \
+  PANVIMDOC_SCRIPTS_DIR="$generator_fixture/missing-scripts" \
+  PANVIMDOC_ARGS_FILE="$invalid_args" \
+  PATH="$panvimdoc_profile/bin:$PATH" \
+  "$generator_fixture/scripts/generate-vimdoc" >"$invalid_output" 2>&1; then
+  echo 'invalid panvimdoc scripts override unexpectedly passed'
+  exit 1
+fi
+if [[ "$(cat "$invalid_output")" != \
+  '::error::PANVIMDOC_SCRIPTS_DIR is not a directory' ]]; then
+  echo 'invalid panvimdoc scripts override did not report the fixed failure'
+  exit 1
+fi
+if [[ -e "$invalid_args" ]]; then
+  echo 'invalid panvimdoc scripts override invoked panvimdoc'
+  exit 1
+fi
+
+docker_override_output="$tmp/docker-override.out"
+docker_override_args="$tmp/docker-override.args"
+if GITHUB_ACTIONS=true \
+  PANVIMDOC_DOCKER_MARKER="$docker_marker" \
+  PANVIMDOC_SCRIPTS_DIR="$override_scripts" \
+  PANVIMDOC_ARGS_FILE="$docker_override_args" \
+  PATH="$panvimdoc_profile/bin:$PATH" \
+  "$generator_fixture/scripts/generate-vimdoc" \
+  >"$docker_override_output" 2>&1; then
+  echo 'non-action Docker scripts override unexpectedly passed'
+  exit 1
+fi
+if [[ "$(cat "$docker_override_output")" != \
+  '::error::PANVIMDOC_SCRIPTS_DIR must be /scripts in Docker' ]]; then
+  echo 'non-action Docker scripts override did not report the fixed failure'
+  exit 1
+fi
+if [[ -e "$docker_override_args" ]]; then
+  echo 'non-action Docker scripts override invoked panvimdoc'
+  exit 1
+fi
+
+docker_layout_output="$tmp/docker-layout.out"
+docker_layout_args="$tmp/docker-layout.args"
+if GITHUB_ACTIONS=true \
+  PANVIMDOC_DOCKER_MARKER="$docker_marker" \
+  PANVIMDOC_SCRIPTS_DIR='' \
+  PANVIMDOC_ARGS_FILE="$docker_layout_args" \
+  PATH="$panvimdoc_profile/bin:$PATH" \
+  "$generator_fixture/scripts/generate-vimdoc" \
+  >"$docker_layout_output" 2>&1; then
+  echo 'missing Docker action scripts layout unexpectedly passed'
+  exit 1
+fi
+if [[ "$(cat "$docker_layout_output")" != \
+  '::error::panvimdoc Docker action layout requires /scripts' ]]; then
+  echo 'missing Docker action scripts layout did not report the fixed failure'
+  exit 1
+fi
+if [[ -e "$docker_layout_args" ]]; then
+  echo 'missing Docker action scripts layout invoked panvimdoc'
+  exit 1
+fi
+
 clean="$(new_fixture clean)"
 "$clean/scripts/check-vimdoc"
 restore_fixture clean "$clean"
