@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+mkdir -p doc
+
+panvimdoc \
+  --project-name muster \
+  --input-file README.md \
+  --vim-version "NVIM v0.12+" \
+  --toc true \
+  --description "Call the roll on tools your Neovim config declares" \
+  --dedup-subheadings true \
+  --demojify true \
+  --treesitter true \
+  --ignore-rawblocks true \
+  --doc-mapping false \
+  --doc-mapping-project-name true \
+  --shift-heading-level-by 0 \
+  --increment-heading-level-by 0
