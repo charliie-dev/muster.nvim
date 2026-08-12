@@ -6,28 +6,20 @@ local config = require("muster.config")
 local function harness(configured, fn)
 	local saved_schedule = vim.schedule
 	local saved_notify = vim.notify
-	local saved_muster = package.loaded["muster"]
-	local saved_report = package.loaded["muster.report"]
+	local saved_automatic = package.loaded["muster.automatic"]
 	local saved_runner = package.loaded["muster.runner"]
 	local scheduled = {}
 	local notifications = {}
-	local check_callback
-	local checks, reports = 0, 0
+	local runs = 0
 	vim.schedule = function(callback)
 		scheduled[#scheduled + 1] = callback
 	end
 	vim.notify = function(message, level, opts)
 		notifications[#notifications + 1] = { message = message, level = level, opts = opts }
 	end
-	package.loaded["muster"] = {
-		check = function(_, callback)
-			checks = checks + 1
-			check_callback = callback
-		end,
-	}
-	package.loaded["muster.report"] = {
-		emit = function()
-			reports = reports + 1
+	package.loaded["muster.automatic"] = {
+		run = function()
+			runs = runs + 1
 		end,
 	}
 	package.loaded["muster.runner"] = nil
@@ -37,14 +29,11 @@ local function harness(configured, fn)
 	end
 	local runner = require("muster.runner")
 	local ok, err = pcall(fn, runner, scheduled, function()
-		return check_callback
-	end, function()
-		return checks, reports
+		return runs
 	end, notifications)
 	vim.schedule = saved_schedule
 	vim.notify = saved_notify
-	package.loaded["muster"] = saved_muster
-	package.loaded["muster.report"] = saved_report
+	package.loaded["muster.automatic"] = saved_automatic
 	package.loaded["muster.runner"] = saved_runner
 	config.reset()
 	if not ok then
@@ -52,108 +41,109 @@ local function harness(configured, fn)
 	end
 end
 
-describe("runner.start async barrier", function()
-	it("waits for enriched check completion and emits exactly once", function()
-		harness(true, function(runner, scheduled, callback, counts)
+describe("runner.start", function()
+	it("is the single guarded production caller of automatic.run", function()
+		harness(true, function(runner, scheduled, runs)
 			runner.start()
 			assert.is_true(runner.has_run())
 			assert.equals(1, #scheduled)
-			assert.same({ 0, 0 }, { counts() })
-
+			assert.equals(0, runs())
 			scheduled[1]()
-			assert.same({ 1, 0 }, { counts() })
-			local result = { entries = {}, skipped = {}, bufnr = 1, notes = {} }
-			callback()(result)
-			callback()(result)
-			assert.same({ 1, 1 }, { counts() })
+			assert.equals(1, runs())
 			runner.start()
 			assert.equals(1, #scheduled)
+			assert.equals(1, runs())
 		end)
 	end)
 
-	it("brands failures before and after enrichment", function()
-		harness(true, function(runner, scheduled, _, _, notifications)
-			package.loaded["muster"].check = function()
-				error("probe exploded")
+	it("contains automatic pipeline failure", function()
+		harness(true, function(runner, scheduled, _, notifications)
+			package.loaded["muster.automatic"].run = function()
+				error("pipeline exploded")
 			end
 			runner.start()
 			scheduled[1]()
 			assert.equals(1, #notifications)
-			assert.is_truthy(notifications[1].message:find("muster: the startup check failed", 1, true))
-			assert.is_truthy(notifications[1].message:find("probe exploded", 1, true))
+			assert.is_truthy(notifications[1].message:find("startup check failed", 1, true))
+			assert.is_truthy(notifications[1].message:find("pipeline exploded", 1, true))
 			assert.equals(vim.log.levels.ERROR, notifications[1].level)
-			assert.equals("muster", notifications[1].opts.title)
-		end)
-
-		harness(true, function(runner, scheduled, callback, _, notifications)
-			package.loaded["muster.report"].emit = function()
-				error("render exploded")
-			end
-			runner.start()
-			scheduled[1]()
-			callback()({ entries = {}, skipped = {}, bufnr = 1, notes = {} })
-			assert.equals(1, #notifications)
-			assert.is_truthy(notifications[1].message:find("muster: the startup check failed", 1, true))
-			assert.is_truthy(notifications[1].message:find("render exploded", 1, true))
-			assert.equals(vim.log.levels.ERROR, notifications[1].level)
-			assert.equals("muster", notifications[1].opts.title)
 		end)
 	end)
 
-	it("contains rejection of the initial scheduler", function()
-		harness(true, function(runner, _, _, _, notifications)
-			vim.schedule = function()
-				error("scheduler exploded")
-			end
-			local ok = pcall(runner.start)
-			assert.is_true(ok)
-			assert.is_true(runner.has_run())
-			assert.equals(1, #notifications)
-			assert.is_truthy(notifications[1].message:find("scheduler exploded", 1, true))
-		end)
-	end)
-
-	it("does not start check work when scheduling invokes then rejects", function()
-		harness(true, function(runner, _, _, counts, notifications)
-			local starts = 0
-			package.loaded["muster"].check = function(_, callback)
-				starts = starts + 1
-				callback({ entries = {}, skipped = {}, bufnr = 1, notes = {} })
-			end
-			vim.schedule = function(fn)
-				fn()
+	it("keeps scheduler rejection health-visible and allows one later retry", function()
+		harness(true, function(runner, scheduled, runs, notifications)
+			vim.schedule = function(callback)
+				callback()
 				error("scheduler rejected after invocation")
 			end
-			local ok = pcall(runner.start)
-			assert.is_true(ok)
-			assert.equals(0, starts)
-			assert.same({ 0, 0 }, { counts() })
+			assert.is_true(pcall(runner.start))
+			assert.is_false(runner.has_run())
+			assert.equals(0, runs())
 			assert.equals(1, #notifications)
-			assert.is_truthy(notifications[1].message:find("after invocation", 1, true))
+
+			local saved_health = vim.health
+			local health_messages = {}
+			local function record(message)
+				health_messages[#health_messages + 1] = tostring(message)
+			end
+			vim.health = { start = record, ok = record, info = record, warn = record, error = record }
+			require("muster.health").check()
+			vim.health = saved_health
+			assert.is_true(vim.iter(health_messages):any(function(message)
+				return message:find("has not run this session", 1, true) ~= nil
+			end))
+
+			vim.schedule = function(callback)
+				scheduled[#scheduled + 1] = callback
+			end
+			runner.start()
+			assert.is_true(runner.has_run())
+			assert.equals(1, #scheduled)
+			scheduled[1]()
+			assert.equals(1, runs())
+			runner.start()
+			assert.equals(1, #scheduled)
+			assert.equals(1, runs())
 		end)
 	end)
 
-	it("contains failure even when vim.notify itself is broken", function()
-		harness(true, function(runner, scheduled, callback)
-			package.loaded["muster.report"].emit = function()
-				vim.notify("reporting")
+	it("allows retry after scheduler rejects before invocation", function()
+		harness(true, function(runner, scheduled, runs)
+			vim.schedule = function()
+				error("scheduler rejected")
 			end
 			runner.start()
+			assert.is_false(runner.has_run())
+			assert.equals(0, runs())
+			vim.schedule = function(callback)
+				scheduled[#scheduled + 1] = callback
+			end
+			runner.start()
+			assert.is_true(runner.has_run())
 			scheduled[1]()
+			assert.equals(1, runs())
+		end)
+	end)
+
+	it("contains failure even when vim.notify is broken", function()
+		harness(true, function(runner, scheduled)
+			package.loaded["muster.automatic"].run = function()
+				error("pipeline exploded")
+			end
+			runner.start()
 			vim.notify = function()
 				error("notify exploded")
 			end
-			local ok = pcall(callback(), { entries = {}, skipped = {}, bufnr = 1, notes = {} })
-			assert.is_true(ok, "the fallback notifier must not leak another scheduled exception")
+			assert.is_true(pcall(scheduled[1]))
 		end)
 	end)
 
 	it("does nothing when setup was never called", function()
-		harness(false, function(runner, scheduled, _, counts)
+		harness(false, function(runner, scheduled, runs)
 			runner.start()
 			assert.is_false(runner.has_run())
 			assert.equals(0, #scheduled)
-			assert.same({ 0, 0 }, { counts() })
+			assert.equals(0, runs())
 		end)
 	end)
 end)

@@ -99,12 +99,28 @@ function M.check()
 		vim.health.error(("setup key %q matches no registered adapter"):format(key))
 	end
 
-	if config.install and config.install ~= false then
-		vim.health.warn(
-			("install = %q is configured, but the Mason hand-off is not implemented yet; "):format(
-				tostring(config.install)
-			) .. "missing tools are reported but nothing is installed."
+	if config.install == "mason" then
+		vim.health.info(
+			'install = "mason" is enabled: only the automatic startup run may refresh or install; '
+				.. "this health check is read-only"
 		)
+	end
+
+	-- Health must not load the automatic pipeline. If the runner loaded it earlier,
+	-- its pure-Lua terminal state is safe to inspect on either configuration path.
+	local automatic = package.loaded["muster.automatic"]
+	if type(automatic) == "table" and type(automatic.status) == "function" then
+		local ok, status = pcall(automatic.status)
+		if ok and type(status) == "table" then
+			if status.state == "bridge_failed" then
+				vim.health.error(
+					"the automatic Mason run could not cross a safe-context bridge: "
+						.. tostring(status.reason or "unknown failure")
+				)
+			elseif status.state == "failed" then
+				vim.health.error("the automatic startup run failed: " .. tostring(status.reason or "unknown failure"))
+			end
+		end
 	end
 
 	local result = require("muster.check").run()

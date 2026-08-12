@@ -70,12 +70,49 @@ describe("health.check", function()
 		assert.is_falsy(has(calls, "info", "setup() has not been called"))
 	end)
 
-	it("says plainly that install = mason does nothing yet", function()
+	it("documents automatic-only Mason authority and renders a terminal bridge failure", function()
 		config.setup({ install = "mason" })
+		local saved = package.loaded["muster.automatic"]
+		package.loaded["muster.automatic"] = {
+			status = function()
+				return { state = "bridge_failed", reason = "both bridges rejected" }
+			end,
+		}
 		local calls = render(function()
 			require("muster.health").check()
 		end)
-		assert.is_truthy(has(calls, "warn", "not implemented yet"))
+		package.loaded["muster.automatic"] = saved
+		assert.is_truthy(has(calls, "info", "only the automatic startup run may refresh or install"))
+		assert.is_truthy(has(calls, "info", "health check is read-only"))
+		assert.is_truthy(has(calls, "error", "both bridges rejected"))
+		assert.is_falsy(has(calls, "warn", "not implemented"))
+	end)
+
+	it("renders a loaded automatic failed state honestly on the E1 path too", function()
+		config.setup({})
+		local saved = package.loaded["muster.automatic"]
+		package.loaded["muster.automatic"] = {
+			status = function()
+				return { state = "failed", reason = "probe failed safely" }
+			end,
+		}
+		local calls = render(function()
+			require("muster.health").check()
+		end)
+		package.loaded["muster.automatic"] = saved
+		assert.is_truthy(has(calls, "error", "automatic startup run failed"))
+		assert.is_truthy(has(calls, "error", "probe failed safely"))
+	end)
+
+	it("does not load the automatic module during a read-only health check", function()
+		config.setup({ install = "mason" })
+		local saved = package.loaded["muster.automatic"]
+		package.loaded["muster.automatic"] = nil
+		render(function()
+			require("muster.health").check()
+		end)
+		assert.is_nil(package.loaded["muster.automatic"])
+		package.loaded["muster.automatic"] = saved
 	end)
 
 	it("never renders a page with no warn and no error while tools are unchecked", function()
