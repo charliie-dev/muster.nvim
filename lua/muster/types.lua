@@ -43,6 +43,28 @@
 ---@field action '"install"'|'"declare"'
 ---@field package? string Only for one unique machine-readable package match.
 ---@field command? string Only when the provider has a real, unambiguous command.
+---@field eligible? boolean E2 hand-off eligibility; automatic install results only.
+---@field reason? string Honest generic reason when eligible == false.
+
+---@class muster.MasonInstallItem
+---@field package string
+---@field binaries string[]
+---@field registry_identity table
+---@field spec_snapshot table
+---@field entries muster.Entry[]
+---@field lsp_names string[]
+---@field install_path string
+---@field outcome "planned"|"dispatched"|"completed"|"failed"|"unknown"
+---@field error? string
+
+---@class muster.MasonPlan
+---@field enabled boolean
+---@field refreshed boolean
+---@field registry_identities string[]
+---@field install_root string
+---@field location any
+---@field items muster.MasonInstallItem[]
+---@field notes string[]
 
 ---@class muster.Entry
 ---@field adapter string      Adapter id; with `name` this is the dedupe key.

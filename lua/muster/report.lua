@@ -36,7 +36,15 @@ local function advice_line(entry, advice)
 		return ("  advice %s: %s matched multiple packages; no package guessed"):format(subject, advice.provider)
 	end
 	if advice.action == "install" then
-		if advice.command then
+		if advice.provider == "mason" and advice.eligible == true then
+			return ("  advice %s: will install %s via mason after this report"):format(subject, advice.package)
+		elseif advice.provider == "mason" and advice.eligible == false then
+			return ("  advice %s: will not install %s via mason — %s"):format(
+				subject,
+				advice.package,
+				advice.reason or "not eligible"
+			)
+		elseif advice.command then
 			return ("  advice %s: %s package %s (%s)"):format(subject, advice.provider, advice.package, advice.command)
 		end
 		return ("  advice %s: install %s via %s"):format(subject, advice.package, advice.provider)

@@ -119,6 +119,50 @@ describe("report advice rendering", function()
 		assert.is_truthy(text:find("install stylua via mason", 1, true))
 		assert.is_falsy(text:find("declare stylua via mason", 1, true))
 	end)
+
+	it("renders eligible Mason advice as planned after this report", function()
+		local res = result({
+			entries = {
+				entry("conform", "stylua", { status = "missing", binary = "stylua" }, {
+					{ provider = "mason", action = "install", package = "stylua", eligible = true },
+				}),
+			},
+		})
+		local text = table.concat(report.lines(res), "\n")
+		assert.is_truthy(text:find("will install stylua via mason after this report", 1, true))
+	end)
+
+	it("renders ineligible Mason advice with its reason and makes no install claim", function()
+		local res = result({
+			entries = {
+				entry("conform", "stylua", { status = "missing", binary = "stylua" }, {
+					{
+						provider = "mason",
+						action = "install",
+						package = "stylua",
+						eligible = false,
+						reason = "installation already in progress",
+					},
+				}),
+			},
+		})
+		local text = table.concat(report.lines(res), "\n")
+		assert.is_truthy(text:find("installation already in progress", 1, true))
+		assert.is_falsy(text:find("will install", 1, true))
+	end)
+
+	it("keeps E1 recommendation wording when eligibility is absent", function()
+		local res = result({
+			entries = {
+				entry("conform", "stylua", { status = "missing", binary = "stylua" }, {
+					{ provider = "mason", action = "install", package = "stylua", command = ":MasonInstall stylua" },
+				}),
+			},
+		})
+		local text = table.concat(report.lines(res), "\n")
+		assert.is_truthy(text:find(":MasonInstall stylua", 1, true))
+		assert.is_falsy(text:find("after this report", 1, true))
+	end)
 end)
 
 describe("report.emit", function()
