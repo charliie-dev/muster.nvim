@@ -6,7 +6,8 @@
 
 local probe = require("muster.probe")
 
----@type muster.Adapter
+---@class muster.ConformAdapter: muster.Adapter
+---@diagnostic disable-next-line: missing-fields
 local M = {
 	id = "conform",
 }

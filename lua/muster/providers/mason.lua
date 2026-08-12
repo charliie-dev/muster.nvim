@@ -7,6 +7,7 @@ local M = {}
 
 ---@param binaries string[]
 ---@return table<string, muster.Advice>
+---@return string|nil error
 function M.collect(binaries)
 	local registry = package.loaded["mason-registry"]
 	if type(registry) ~= "table" or type(registry.get_all_package_specs) ~= "function" then

@@ -91,6 +91,7 @@ local function entries_for(id, adapter)
 	-- Derived mode. Availability is checked FIRST: without it, an absent
 	-- none-ls yields an empty read and muster would report "loaded but has no
 	-- registered sources" about a plugin that is not installed.
+	---@cast adapter muster.NoneLsAdapter
 	if id == "none_ls" and type(adapter.registered) == "function" and adapter.available() then
 		local ok, sources = adapter.registered()
 		if not ok then

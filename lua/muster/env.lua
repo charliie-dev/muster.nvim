@@ -20,7 +20,7 @@ end
 ---on EOF). Both streams are captured because tools disagree about where a
 ---version belongs.
 ---@param result vim.SystemCompleted
----@return { code: integer, signal: integer, output: string, error?: string }
+---@return muster.ProcessResult
 local function capture(result)
 	return {
 		code = result.code,
@@ -31,8 +31,8 @@ end
 
 ---@param cmd string[]
 ---@param opts? { timeout_ms?: integer }
----@param callback? fun(result: { code: integer, signal: integer, output: string, error?: string })
----@return { code: integer, signal: integer, output: string, error?: string }|nil
+---@param callback? fun(result: muster.ProcessResult)
+---@return muster.ProcessResult|nil
 function M.spawn(cmd, opts, callback)
 	opts = opts or {}
 	local system_opts = {

@@ -1,0 +1,7 @@
+{
+  "runtime.version": "Lua 5.1",
+  "runtime.path": ["lua/?.lua", "lua/?/init.lua"],
+  "workspace.library": ["${env:VIMRUNTIME}/lua", "${3rd}/luv/library"],
+  "workspace.checkThirdParty": false,
+  "diagnostics.globals": ["vim"]
+}

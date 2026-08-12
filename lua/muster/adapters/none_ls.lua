@@ -8,7 +8,8 @@
 
 local probe = require("muster.probe")
 
----@type muster.Adapter
+---@class muster.NoneLsAdapter: muster.Adapter
+---@diagnostic disable-next-line: missing-fields
 local M = {
 	id = "none_ls",
 }

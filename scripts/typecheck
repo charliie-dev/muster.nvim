@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VIMRUNTIME="$(nvim --clean --headless -i NONE --cmd 'lua io.write(vim.env.VIMRUNTIME)' +qa)"
+export VIMRUNTIME
+tmp_root="$(mktemp -d)"
+trap 'rm -rf "$tmp_root"' EXIT
+
+for target in lua plugin; do
+  lua-language-server \
+    --check "$root/$target" \
+    --checklevel=Warning \
+    --check_format=pretty \
+    --configpath="$root/.luarc.json" \
+    --logpath="$tmp_root/$target-log" \
+    --metapath="$tmp_root/$target-meta"
+done

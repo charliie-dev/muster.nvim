@@ -27,6 +27,7 @@
 ---One subsystem, adapted to a single interface.
 ---@class muster.Adapter
 ---@field id string
+---@field __muster_builtin? boolean Internal marker set by the registry for built-in adapters.
 ---@field available fun(): boolean, string|nil Is the host plugin loaded? The
 ---  second return is why not — "installed but not loaded yet" and "not
 ---  installed" are different things and must not read alike.
@@ -41,10 +42,16 @@
 ---@class muster.Advice
 ---@field provider '"mason"'|'"nix"'|'"mise"'
 ---@field action '"install"'|'"declare"'
----@field package? string Only for one unique machine-readable package match.
+---@field ["package"]? string Only for one unique machine-readable package match.
 ---@field command? string Only when the provider has a real, unambiguous command.
 ---@field eligible? boolean E2 hand-off eligibility; automatic install results only.
 ---@field reason? string Honest generic reason when eligible == false.
+
+---@class muster.ProcessResult
+---@field code integer
+---@field signal integer
+---@field output string
+---@field error? string
 
 ---@class muster.MasonInstallItem
 ---@field package string
