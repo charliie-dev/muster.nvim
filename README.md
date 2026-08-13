@@ -15,44 +15,65 @@ an explicit `install = "mason"` opt-in on the automatic startup run.
 
 ### Read-only mode
 
-With the lazy.nvim plugin manager, the options table below is passed to muster's
-setup function:
+With lazy.nvim, load the host integrations before muster when the first real
+buffer opens. Each dependency below is expected to have its own `opts` or
+`config` that requires and configures the host module before muster's setup
+runs; a bare repository dependency may not make that adapter available.
 
 ```lua
 {
   "charliie-dev/muster.nvim",
-  lazy = false,
+  event = { "BufReadPost", "BufNewFile" },
+  cmd = "Muster",
+  dependencies = {
+    "neovim/nvim-lspconfig",
+    "stevearc/conform.nvim",
+    "mfussenegger/nvim-lint",
+    "mfussenegger/nvim-dap",
+  },
   opts = {
     lsp = { "lua_ls", "gopls" },
     conform = { "stylua" },
     lint = { "selene" },
     dap = { "codelldb" },
+    install = false,
+    notify_on_startup = true,
   },
 }
 ```
 
 ### Optional Mason mode
 
-Load and set up Mason before muster. Append Mason's bin directory to the PATH environment variable.
+Load and set up Mason before muster. Append Mason's bin directory to the PATH
+environment variable. As in read-only mode, the listed host dependencies must
+have their own `opts` or `config` that finishes host setup before muster runs.
 
 ```lua
 {
   "mason-org/mason.nvim",
-  lazy = false,
+  cmd = { "Mason", "MasonInstall", "MasonUninstall", "MasonUpdate" },
   opts = {
     PATH = "append",
   },
 },
 {
   "charliie-dev/muster.nvim",
-  lazy = false,
-  dependencies = { "mason-org/mason.nvim" },
+  event = { "BufReadPost", "BufNewFile" },
+  cmd = "Muster",
+  dependencies = {
+    "mason-org/mason.nvim",
+    "neovim/nvim-lspconfig",
+    "stevearc/conform.nvim",
+    "mfussenegger/nvim-lint",
+    "mfussenegger/nvim-dap",
+  },
   opts = {
     lsp = { "lua_ls", "gopls" },
     conform = { "stylua" },
     lint = { "selene" },
     dap = { "codelldb" },
     install = "mason",
+    notify_on_startup = true,
   },
 }
 ```
@@ -63,49 +84,73 @@ directory off the PATH environment variable.
 
 ## Configuration
 
-A full setup can declare every built-in adapter and both options:
+A full lazy.nvim spec can declare every built-in adapter and both options. The
+config callback runs only after the buffer event and after its host dependencies:
 
 ```lua
-local null_ls = require("null-ls")
-require("muster").setup({
-  lsp = { "lua_ls", "gopls" },
-  conform = { "stylua", "prettierd" },
-  lint = { "selene" },
-  dap = { "codelldb" },
-  none_ls = {
-    null_ls.builtins.formatting.stylua,
+{
+  "charliie-dev/muster.nvim",
+  event = { "BufReadPost", "BufNewFile" },
+  cmd = "Muster",
+  dependencies = {
+    "neovim/nvim-lspconfig",
+    "stevearc/conform.nvim",
+    "mfussenegger/nvim-lint",
+    "mfussenegger/nvim-dap",
+    "nvimtools/none-ls.nvim",
   },
-  install = false,          -- false (default) or "mason"
-  notify_on_startup = true, -- default; silent when nothing needs attention
-})
+  config = function()
+    local null_ls = require("null-ls")
+    require("muster").setup({
+      lsp = { "lua_ls", "gopls" },
+      conform = { "stylua", "prettierd" },
+      lint = { "selene" },
+      dap = { "codelldb" },
+      none_ls = {
+        null_ls.builtins.formatting.stylua,
+      },
+      install = false,          -- false (default) or "mason"
+      notify_on_startup = true, -- default; silent when nothing needs attention
+    })
+  end,
+}
 ```
 
 Use the names and entries accepted by each host plugin. If the `none_ls` key is
 omitted, muster reads the registered none-ls sources after `null-ls.setup()`.
 All other lists are explicit; muster does not infer them from filetype mappings.
 
-Third-party integrations use the same adapter interface and setup key:
+Third-party integrations use the same adapter interface and setup key. Register
+them inside the lazy config callback before calling setup:
 
 ```lua
-require("muster").register({
-  id = "guard",
-  available = function()
-    return true
+{
+  "charliie-dev/muster.nvim",
+  event = { "BufReadPost", "BufNewFile" },
+  cmd = "Muster",
+  config = function()
+    local muster = require("muster")
+    muster.register({
+      id = "guard",
+      available = function()
+        return true
+      end,
+      identity = function(entry)
+        return entry.name
+      end,
+      probe = function(entry, bufnr)
+        -- Return a muster.Probe for this entry and buffer.
+      end,
+      live = function(bufnr)
+        -- Optional: return entries active in this buffer.
+        return {}
+      end,
+    })
+    muster.setup({
+      guard = { { name = "example" } },
+    })
   end,
-  identity = function(entry)
-    return entry.name
-  end,
-  probe = function(entry, bufnr)
-    -- Return a muster.Probe for this entry and buffer.
-  end,
-  live = function(bufnr)
-    -- Optional: return entries active in this buffer.
-    return {}
-  end,
-})
-require("muster").setup({
-  guard = { { name = "example" } },
-})
+}
 ```
 
 Adapter ids must be unique. An unregistered setup key is reported as a
@@ -118,10 +163,12 @@ configuration error rather than ignored.
 - `:Muster` opens a fresh report for the current buffer. Its first section shows
   tools live in that buffer; the second shows all other declared tools.
 - `:checkhealth muster` synchronously checks configuration and declared tools.
-- After `VimEnter`, the automatic check can notify about missing, unknown,
-  broken, or unverifiable tools and skipped host plugins. It omits found tools
-  and is silent when nothing needs attention. Set
-  `notify_on_startup = false` to disable only this notification.
+- With the lazy.nvim examples above, the automatic check runs once after the
+  first real buffer opens and a UI attaches. `VimEnter` provides the fallback
+  for headless sessions. It can notify about missing, unknown, broken, or
+  unverifiable tools and skipped host plugins. It omits found tools and is
+  silent when nothing needs attention. Set `notify_on_startup = false` to
+  disable only this notification.
 
 Both commands are inspection surfaces: they do not run provider enrichment,
 refresh Mason, or install anything.
@@ -202,8 +249,12 @@ muster never automatically uninstalls or cleans up packages.
 
 ## Known limits
 
-- Lazy host plugins are not force-loaded. Until a host plugin loads, its declared
-  entries are skipped as "host plugin not loaded" rather than called typos.
+- muster itself never force-loads host plugins. The lazy.nvim examples ask Lazy
+  to load the host specs first, but those specs must still run their own setup
+  and require their main modules. Conform, lint, DAP, and none-ls are skipped as
+  "host plugin not loaded" until that happens. LSP is the exception: its adapter
+  uses Neovim's built-in `vim.lsp.config`, so an unresolved server is `unknown`
+  rather than a skipped host.
 - DAP has no external name catalog. Mason hand-off works only when an adapter's
   command is the actual tool binary; wrappers such as a Python interpreter may
   not map to a useful package.
