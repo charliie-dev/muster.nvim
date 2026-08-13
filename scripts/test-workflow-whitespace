@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+workflow="$repo_root/.github/workflows/ci.yml"
+tmp="$(mktemp -d)"
+cleanup() {
+  rm -rf -- "$tmp"
+}
+trap cleanup EXIT HUP INT TERM
+
+whitespace_script="$tmp/whitespace.sh"
+ruby - "$workflow" "$whitespace_script" <<'RUBY'
+require "psych"
+
+workflow_path, output_path = ARGV
+workflow = Psych.safe_load(File.binread(workflow_path), aliases: false)
+steps = workflow.fetch("jobs").fetch("static").fetch("steps")
+whitespace_indexes = steps.each_index.select do |index|
+  steps.fetch(index)["name"] == "Check committed whitespace"
+end
+raise "expected one whitespace step" unless whitespace_indexes.length == 1
+
+whitespace_index = whitespace_indexes.fetch(0)
+test_index = steps.index do |step|
+  step["name"] == "Test workflow whitespace audit"
+end
+raise "whitespace fixture is not immediately before production audit" unless test_index == whitespace_index - 1
+raise "whitespace fixture command changed" unless steps.fetch(test_index).fetch("run").end_with?(
+  "scripts/test-workflow-whitespace",
+)
+
+environment = steps.fetch(whitespace_index).fetch("env")
+raise "PR base expression changed" unless environment.fetch("PR_BASE_SHA") ==
+  "${{ github.event.pull_request.base.sha }}"
+raise "push base expression changed" unless environment.fetch("PUSH_BEFORE_SHA") ==
+  "${{ github.event.before }}"
+raise "push forced expression changed" unless environment.fetch("PUSH_FORCED") ==
+  "${{ github.event.forced }}"
+
+run = steps.fetch(whitespace_index).fetch("run")
+raise "whitespace source wrapper changed" unless run.start_with?("set -euo pipefail\n")
+File.binwrite(output_path, "#!/usr/bin/env bash\n#{run}")
+RUBY
+chmod +x "$whitespace_script"
+
+create_repo() {
+  local label="$1"
+  local repo="$tmp/repos/$label"
+  mkdir -p -- "$repo"
+  git init -q "$repo"
+  git -C "$repo" config user.name Fixture
+  git -C "$repo" config user.email fixture@example.invalid
+  printf '%s\n' "$repo"
+}
+
+commit_audit() {
+  local repo="$1"
+  local contents="$2"
+  local message="$3"
+  printf '%s' "$contents" >"$repo/audit.txt"
+  git -C "$repo" add audit.txt
+  git -C "$repo" commit -qm "$message"
+  git -C "$repo" rev-parse HEAD
+}
+
+run_case() {
+  local label="$1"
+  local expected_status="$2"
+  local expected_output="$3"
+  local repo="$4"
+  local event="$5"
+  local head_sha="$6"
+  local pr_base_sha="$7"
+  local push_before_sha="$8"
+  local push_forced="$9"
+  local output
+  local actual_status
+
+  set +e
+  output="$({
+    cd -- "$repo" &&
+      GITHUB_EVENT_NAME="$event" \
+      GITHUB_SHA="$head_sha" \
+      PR_BASE_SHA="$pr_base_sha" \
+      PUSH_BEFORE_SHA="$push_before_sha" \
+      PUSH_FORCED="$push_forced" \
+      "$whitespace_script"
+  } 2>&1)"
+  actual_status=$?
+  set -e
+
+  if ((actual_status != expected_status)); then
+    printf '%s returned %s instead of %s\n' "$label" "$actual_status" "$expected_status"
+    printf '%s\n' "$output"
+    exit 1
+  fi
+  if [[ "$output" != "$expected_output" ]]; then
+    printf '%s returned unexpected output\n' "$label"
+    printf '%s\n' "$output"
+    exit 1
+  fi
+}
+
+zero_sha='0000000000000000000000000000000000000000'
+missing_sha='1111111111111111111111111111111111111111'
+
+pr_repo="$(create_repo pr-pass)"
+pr_base="$(commit_audit "$pr_repo" $'base\n' base)"
+pr_head="$(commit_audit "$pr_repo" $'head\n' head)"
+run_case pr-pass 0 '' "$pr_repo" pull_request "$pr_head" "$pr_base" '' malformed-is-irrelevant
+
+push_repo="$(create_repo normal-push-pass)"
+push_base="$(commit_audit "$push_repo" $'base\n' base)"
+push_head="$(commit_audit "$push_repo" $'head\n' head)"
+run_case normal-push-pass 0 '' "$push_repo" push "$push_head" '' "$push_base" false
+
+initial_repo="$(create_repo initial-push-pass)"
+initial_head="$(commit_audit "$initial_repo" $'initial\n' initial)"
+empty_tree="$(git -C "$initial_repo" hash-object -t tree /dev/null)"
+run_case initial-push-pass 0 '' "$initial_repo" push "$initial_head" '' "$zero_sha" false
+if ! git -C "$initial_repo" cat-file -e "${empty_tree}^{tree}" 2>/dev/null; then
+  echo 'initial-push audit did not materialize the empty tree'
+  exit 1
+fi
+
+forced_repo="$(create_repo force-push-pass)"
+forced_head="$(commit_audit "$forced_repo" $'rewritten\n' rewritten)"
+forced_output="$(git -C "$forced_repo" log --check --oneline "$forced_head")"
+run_case force-push-pass 0 "$forced_output" "$forced_repo" push "$forced_head" '' "$missing_sha" true
+run_case missing-base-non-forced 1 '::error::workflow base is unavailable' \
+  "$forced_repo" push "$forced_head" '' "$missing_sha" false
+run_case malformed-forced 1 '::error::invalid push forced flag' \
+  "$forced_repo" push "$forced_head" '' "$forced_head" TRUE
+
+history_repo="$(create_repo historical-whitespace)"
+commit_audit "$history_repo" $'clean\n' root >/dev/null
+commit_audit "$history_repo" $'historical trailing \n' bad >/dev/null
+history_head="$(commit_audit "$history_repo" $'clean again\n' repaired)"
+history_empty="$(git -C "$history_repo" hash-object -w -t tree /dev/null)"
+git -C "$history_repo" diff --check "$history_empty" "$history_head"
+set +e
+history_output="$(git -C "$history_repo" log --check --oneline "$history_head" 2>&1)"
+history_status=$?
+set -e
+if ((history_status != 2)) || [[ "$history_output" != *'audit.txt:1: trailing whitespace.'* ]]; then
+  echo 'historical-whitespace control did not detect the repaired violation'
+  exit 1
+fi
+run_case historical-whitespace "$history_status" "$history_output" \
+  "$history_repo" push "$history_head" '' "$missing_sha" true
+
+snapshot_repo="$(create_repo final-snapshot-whitespace)"
+snapshot_root="$(commit_audit "$snapshot_repo" $'clean\n' root)"
+git -C "$snapshot_repo" checkout -qb side "$snapshot_root"
+printf 'side\n' >"$snapshot_repo/side.txt"
+git -C "$snapshot_repo" add side.txt
+git -C "$snapshot_repo" commit -qm side
+snapshot_side="$(git -C "$snapshot_repo" rev-parse HEAD)"
+git -C "$snapshot_repo" checkout -q --detach "$snapshot_root"
+printf 'main\n' >"$snapshot_repo/main.txt"
+git -C "$snapshot_repo" add main.txt
+git -C "$snapshot_repo" commit -qm main
+snapshot_main="$(git -C "$snapshot_repo" rev-parse HEAD)"
+printf 'final trailing \n' >"$snapshot_repo/audit.txt"
+git -C "$snapshot_repo" add audit.txt
+snapshot_tree="$(git -C "$snapshot_repo" write-tree)"
+snapshot_head="$(
+  printf 'merge snapshot\n' |
+    git -C "$snapshot_repo" commit-tree "$snapshot_tree" -p "$snapshot_main" -p "$snapshot_side"
+)"
+snapshot_log_output="$(git -C "$snapshot_repo" log --check --oneline "$snapshot_head")"
+snapshot_empty="$(git -C "$snapshot_repo" hash-object -w -t tree /dev/null)"
+set +e
+snapshot_diff_output="$(
+  git -C "$snapshot_repo" diff --check "$snapshot_empty" "$snapshot_head" 2>&1
+)"
+snapshot_diff_status=$?
+set -e
+if ((snapshot_diff_status != 2)) || [[ "$snapshot_diff_output" != *'audit.txt:1: trailing whitespace.'* ]]; then
+  echo 'final-snapshot control did not detect the merge-tree violation'
+  exit 1
+fi
+snapshot_output="${snapshot_log_output}"$'\n'"${snapshot_diff_output}"
+run_case final-snapshot-whitespace "$snapshot_diff_status" "$snapshot_output" \
+  "$snapshot_repo" push "$snapshot_head" '' "$missing_sha" true
+
+invalid_repo="$(create_repo invalid-shas)"
+invalid_head="$(commit_audit "$invalid_repo" $'clean\n' clean)"
+run_case malformed-head 1 '::error::invalid workflow head SHA' \
+  "$invalid_repo" push invalid '' "$zero_sha" false
+run_case unavailable-head 1 '::error::workflow head commit is unavailable' \
+  "$invalid_repo" push '2222222222222222222222222222222222222222' '' "$zero_sha" false
+run_case malformed-pr-base 1 '::error::invalid workflow base SHA' \
+  "$invalid_repo" pull_request "$invalid_head" invalid '' false
+run_case unavailable-pr-base 1 '::error::workflow base is unavailable' \
+  "$invalid_repo" pull_request "$invalid_head" \
+  '3333333333333333333333333333333333333333' '' false
+run_case malformed-push-base 1 '::error::invalid push before SHA' \
+  "$invalid_repo" push "$invalid_head" '' invalid false
+
+cleanup
+trap - EXIT HUP INT TERM
+if [[ -e "$tmp" ]]; then
+  echo 'workflow whitespace fixtures were not cleaned up'
+  exit 1
+fi
+printf 'workflow whitespace fixtures passed\n'

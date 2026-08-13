@@ -329,7 +329,8 @@ jobs:
           nix --option accept-flake-config false --option netrc-file /dev/null develop --command
           shellcheck scripts/check-vimdoc scripts/generate-vimdoc
           scripts/test-vimdoc-gate scripts/test-workflow-action-guard
-          scripts/test-nix-netrc-override scripts/test-debug-call-cli scripts/typecheck
+          scripts/test-workflow-whitespace scripts/test-nix-netrc-override
+          scripts/test-debug-call-cli scripts/typecheck
 
       - name: Run StyLua
         run: >-
@@ -363,11 +364,17 @@ jobs:
           nvim --clean --headless -u NONE -i NONE
           -l scripts/check-debug-calls.lua lua plugin
 
+      - name: Test workflow whitespace audit
+        run: >-
+          nix --option accept-flake-config false --option netrc-file /dev/null develop --command
+          scripts/test-workflow-whitespace
+
       - name: Check committed whitespace
         shell: bash
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_FORCED: ${{ github.event.forced }}
         run: |
           set -euo pipefail
           sha_pattern='^[0-9a-fA-F]{40}$'
@@ -393,8 +400,24 @@ jobs:
                 echo '::error::invalid push before SHA'
                 exit 1
               fi
+              case "$PUSH_FORCED" in
+                true|false) ;;
+                *)
+                  echo '::error::invalid push forced flag'
+                  exit 1
+                  ;;
+              esac
               if [[ "$base_sha" == "$zero_sha" ]]; then
                 base_sha="$(git hash-object -w -t tree /dev/null)"
+              elif ! git cat-file -e "${base_sha}^{tree}" 2>/dev/null; then
+                if [[ "$PUSH_FORCED" != true ]]; then
+                  echo '::error::workflow base is unavailable'
+                  exit 1
+                fi
+                empty_tree="$(git hash-object -w -t tree /dev/null)"
+                git log --check --oneline "$head_sha"
+                git diff --check "$empty_tree" "$head_sha"
+                exit 0
               fi
               ;;
             *)
