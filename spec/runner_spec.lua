@@ -5,14 +5,20 @@ local config = require("muster.config")
 
 local function harness(configured, fn)
 	local saved_schedule = vim.schedule
+	local saved_defer_fn = vim.defer_fn
 	local saved_notify = vim.notify
 	local saved_automatic = package.loaded["muster.automatic"]
+	local saved_automatic_preload = package.preload["muster.automatic"]
 	local saved_runner = package.loaded["muster.runner"]
 	local scheduled = {}
+	local deferred = {}
 	local notifications = {}
 	local runs = 0
 	vim.schedule = function(callback)
 		scheduled[#scheduled + 1] = callback
+	end
+	vim.defer_fn = function(callback, delay)
+		deferred[#deferred + 1] = { callback = callback, delay = delay }
 	end
 	vim.notify = function(message, level, opts)
 		notifications[#notifications + 1] = { message = message, level = level, opts = opts }
@@ -30,10 +36,12 @@ local function harness(configured, fn)
 	local runner = require("muster.runner")
 	local ok, err = pcall(fn, runner, scheduled, function()
 		return runs
-	end, notifications)
+	end, notifications, deferred)
 	vim.schedule = saved_schedule
+	vim.defer_fn = saved_defer_fn
 	vim.notify = saved_notify
 	package.loaded["muster.automatic"] = saved_automatic
+	package.preload["muster.automatic"] = saved_automatic_preload
 	package.loaded["muster.runner"] = saved_runner
 	config.reset()
 	if not ok then
@@ -67,6 +75,20 @@ describe("runner.start", function()
 			assert.is_truthy(notifications[1].message:find("startup check failed", 1, true))
 			assert.is_truthy(notifications[1].message:find("pipeline exploded", 1, true))
 			assert.equals(vim.log.levels.ERROR, notifications[1].level)
+		end)
+	end)
+
+	it("contains automatic module loading failure", function()
+		harness(true, function(runner, scheduled, _, notifications)
+			package.loaded["muster.automatic"] = nil
+			package.preload["muster.automatic"] = function()
+				error("automatic module exploded")
+			end
+			runner.start()
+			assert.is_true(pcall(scheduled[1]))
+			assert.equals(1, #notifications)
+			assert.is_truthy(notifications[1].message:find("startup check failed", 1, true))
+			assert.is_truthy(notifications[1].message:find("automatic module exploded", 1, true))
 		end)
 	end)
 
@@ -144,6 +166,93 @@ describe("runner.start", function()
 			assert.is_false(runner.has_run())
 			assert.equals(0, #scheduled)
 			assert.equals(0, runs())
+		end)
+	end)
+end)
+
+describe("runner.defer_start", function()
+	it("runs once from an accepted scheduled callback", function()
+		harness(true, function(runner, scheduled, runs, _, deferred)
+			runner.defer_start()
+			assert.equals(1, #scheduled)
+			assert.equals(0, #deferred)
+			assert.equals(0, runs())
+			scheduled[1]()
+			assert.is_true(runner.has_run())
+			assert.equals(1, runs())
+		end)
+	end)
+
+	it("falls back when schedule rejects before invocation", function()
+		harness(true, function(runner, _, runs, _, deferred)
+			vim.schedule = function()
+				error("schedule rejected")
+			end
+			assert.is_true(pcall(runner.defer_start))
+			assert.equals(1, #deferred)
+			assert.equals(0, deferred[1].delay)
+			assert.equals(0, runs())
+			deferred[1].callback()
+			assert.equals(1, runs())
+		end)
+	end)
+
+	it("falls back after an invoke-then-throw scheduler without starting early", function()
+		harness(true, function(runner, _, runs, _, deferred)
+			vim.schedule = function(callback)
+				callback()
+				error("schedule rejected after invocation")
+			end
+			runner.defer_start()
+			assert.equals(0, runs())
+			assert.equals(1, #deferred)
+			deferred[1].callback()
+			assert.equals(1, runs())
+		end)
+	end)
+
+	it("contains an invoke-then-throw defer fallback without starting early", function()
+		harness(true, function(runner, _, runs)
+			local runs_during_callback
+			vim.schedule = function()
+				error("schedule rejected")
+			end
+			vim.defer_fn = function(callback)
+				callback()
+				runs_during_callback = runs()
+				error("defer rejected after invocation")
+			end
+			assert.is_true(pcall(runner.defer_start))
+			assert.equals(0, runs_during_callback)
+			assert.equals(1, runs())
+		end)
+	end)
+
+	it("uses a contained immediate fallback when both bridges reject", function()
+		harness(true, function(runner, _, runs)
+			vim.schedule = function()
+				error("schedule rejected")
+			end
+			vim.defer_fn = function()
+				error("defer rejected")
+			end
+			assert.is_true(pcall(runner.defer_start))
+			assert.equals(1, runs())
+		end)
+	end)
+
+	it("reports a deferred startup failure exactly once", function()
+		harness(true, function(runner, scheduled, _, notifications)
+			runner.start = function()
+				error("deferred start exploded")
+			end
+			runner.defer_start()
+			assert.equals(1, #scheduled)
+			scheduled[1]()
+			scheduled[1]()
+			assert.equals(1, #notifications)
+			assert.is_truthy(notifications[1].message:find("startup check failed", 1, true))
+			assert.is_truthy(notifications[1].message:find("deferred start exploded", 1, true))
 		end)
 	end)
 end)

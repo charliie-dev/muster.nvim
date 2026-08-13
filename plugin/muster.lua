@@ -18,10 +18,42 @@ vim.api.nvim_create_user_command("Muster", function()
 	require("muster.overlay").open(bufnr)
 end, { desc = "muster: show tool status for this buffer and everything else" })
 
+local group = vim.api.nvim_create_augroup("muster", { clear = true })
+local requested = false
+local function request_start()
+	if requested then
+		return
+	end
+	local ok, err = pcall(function()
+		require("muster.runner").defer_start()
+	end)
+	if ok then
+		requested = true
+	else
+		package.loaded["muster.runner"] = nil
+		pcall(vim.notify, "muster: failed to request the startup check: " .. tostring(err), vim.log.levels.ERROR, {
+			title = "muster",
+		})
+	end
+end
+
+vim.api.nvim_create_autocmd("UIEnter", {
+	group = group,
+	once = true,
+	callback = request_start,
+})
+
 vim.api.nvim_create_autocmd("VimEnter", {
-	group = vim.api.nvim_create_augroup("muster", { clear = true }),
+	group = group,
 	once = true,
 	callback = function()
-		require("muster.runner").start()
+		local ok = pcall(vim.defer_fn, function()
+			if not requested then
+				request_start()
+			end
+		end, 0)
+		if not ok then
+			request_start()
+		end
 	end,
 })

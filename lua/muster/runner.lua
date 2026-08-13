@@ -4,23 +4,25 @@ local M = {}
 
 local ran = false
 
+---@param err any
+local function failed(err)
+	pcall(
+		vim.notify,
+		("muster: the startup check failed: %s"):format(tostring(err)),
+		vim.log.levels.ERROR,
+		{ title = "muster" }
+	)
+end
+
 ---@return boolean
 function M.has_run()
 	return ran
 end
 
-function M.start()
+---@param immediate? boolean Already executing from an accepted safe-context bridge.
+function M.start(immediate)
 	if ran or not require("muster.config").get() then
 		return
-	end
-
-	local function failed(err)
-		pcall(
-			vim.notify,
-			("muster: the startup check failed: %s"):format(tostring(err)),
-			vim.log.levels.ERROR,
-			{ title = "muster" }
-		)
 	end
 
 	local started = false
@@ -32,11 +34,19 @@ function M.start()
 			return
 		end
 		started = true
-		local ok, err = pcall(require("muster.automatic").run)
+		local ok, err = pcall(function()
+			require("muster.automatic").run()
+		end)
 		if not ok then
 			failed(err)
 		end
 	end
+	if immediate then
+		ran = true
+		run()
+		return
+	end
+
 	local function scheduled()
 		if schedule_returned then
 			run()
@@ -57,6 +67,59 @@ function M.start()
 	if requested then
 		run()
 	end
+end
+
+---Defer startup until after VimEnter while containing scheduler failures.
+function M.defer_start()
+	local started = false
+	local function start_once()
+		if started then
+			return
+		end
+		started = true
+		local ok, err = pcall(M.start, true)
+		if not ok then
+			failed(err)
+		end
+	end
+
+	local schedule_returned = false
+	local requested = false
+	local function scheduled()
+		if schedule_returned then
+			start_once()
+		else
+			requested = true
+		end
+	end
+	local ok = pcall(vim.schedule, scheduled)
+	schedule_returned = true
+	if ok then
+		if requested then
+			start_once()
+		end
+		return
+	end
+
+	local defer_returned = false
+	requested = false
+	local function deferred()
+		if defer_returned then
+			start_once()
+		else
+			requested = true
+		end
+	end
+	ok = pcall(vim.defer_fn, deferred, 0)
+	defer_returned = true
+	if ok then
+		if requested then
+			start_once()
+		end
+		return
+	end
+
+	start_once()
 end
 
 ---Test seam.
