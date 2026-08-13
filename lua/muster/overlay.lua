@@ -279,6 +279,19 @@ function M.open(source_bufnr)
 	})
 	vim.wo[winid].wrap = false
 	vim.wo[winid].cursorline = true
+	local function close_report()
+		if vim.api.nvim_win_is_valid(winid) then
+			vim.api.nvim_win_close(winid, true)
+		end
+	end
+	local map_options = {
+		buffer = bufnr,
+		desc = "Close Muster report",
+		nowait = true,
+		silent = true,
+	}
+	vim.keymap.set("n", "q", close_report, map_options)
+	vim.keymap.set("n", "<Esc>", close_report, map_options)
 
 	local version = require("muster.version")
 	for _, entries in ipairs({ view.active, view.other }) do

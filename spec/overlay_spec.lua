@@ -437,8 +437,8 @@ describe("overlay.open", function()
 				assert.is_true(vim.api.nvim_win_is_valid(win))
 				assert.equals("editor", vim.api.nvim_win_get_config(win).relative)
 				assert.equals("nofile", vim.bo[report_buf].buftype)
+				assert.equals("wipe", vim.bo[report_buf].bufhidden)
 				assert.equals("muster://report", vim.api.nvim_buf_get_name(report_buf))
-				assert.same({}, vim.api.nvim_buf_get_keymap(report_buf, "n"))
 				assert.is_truthy(
 					table.concat(vim.api.nvim_buf_get_lines(report_buf, 0, -1, false), "\n"):find("…", 1, true)
 				)
@@ -458,6 +458,56 @@ describe("overlay.open", function()
 				end, function()
 					close_overlay(win, report_buf, source_buf)
 				end)
+			end)
+		end)
+	end)
+
+	it("defines and runs both buffer-local close mappings with pending versions", function()
+		local adapter = fake("a", {
+			live = function()
+				return { "tool" }
+			end,
+		})
+		with_adapters({ adapter }, { a = { "tool" } }, function(overlay)
+			local version = require("muster.version")
+			local saved_resolve = version.resolve
+			local finish
+			version.resolve = function(_, callback)
+				finish = callback
+			end
+
+			protect(function()
+				for _, lhs in ipairs({ "q", "<Esc>" }) do
+					local source_buf, report_buf, win
+					local current_win = vim.api.nvim_get_current_win()
+					protect(function()
+						source_buf = vim.api.nvim_create_buf(false, true)
+						report_buf, win = overlay.open(source_buf)
+						local mappings = vim.api.nvim_buf_get_keymap(report_buf, "n")
+						assert.equals(2, #mappings)
+						local matching = vim.tbl_filter(function(mapping)
+							return mapping.lhs == lhs
+						end, mappings)
+						assert.equals(1, #matching)
+						local mapping = matching[1]
+						assert.equals(1, mapping.silent)
+						assert.equals(1, mapping.nowait)
+						assert.equals("Close Muster report", mapping.desc)
+						vim.api.nvim_set_current_win(current_win)
+						mapping.callback()
+						mapping.callback()
+						assert.is_false(vim.api.nvim_win_is_valid(win))
+						assert.is_false(vim.api.nvim_buf_is_valid(report_buf))
+						assert.is_true(vim.api.nvim_buf_is_valid(source_buf))
+						assert.equals(current_win, vim.api.nvim_get_current_win())
+						finish({ value = "late", tier = 4 })
+						vim.wait(20)
+					end, function()
+						close_overlay(win, report_buf, source_buf)
+					end)
+				end
+			end, function()
+				version.resolve = saved_resolve
 			end)
 		end)
 	end)
