@@ -1,7 +1,6 @@
 ---Type definitions for muster.nvim. This module is documentation only: it holds
 ---no runtime state and exports an empty table, so requiring it is free.
 ---
----See DESIGN.md for the reasoning behind each field.
 
 ---How a declared tool resolved.
 ---@alias muster.Status
