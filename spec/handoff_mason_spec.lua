@@ -3,6 +3,16 @@ local assert = require("luassert")
 
 local handoff = require("muster.handoff.mason")
 
+local function with_pinned_mason(callback)
+	local path = assert(vim.env.MUSTER_MASON_NVIM_PATH, "MUSTER_MASON_NVIM_PATH must name the pinned Mason input")
+	vim.opt.runtimepath:prepend(path)
+	local ok, err = pcall(callback)
+	vim.opt.runtimepath:remove(path)
+	if not ok then
+		error(err, 0)
+	end
+end
+
 local function advice(package_name)
 	return { provider = "mason", action = "install", package = package_name, command = ":MasonInstall " .. package_name }
 end
@@ -41,11 +51,123 @@ local function registry_identity(id, source)
 	}
 end
 
+local function compiler_fixture()
+	return {
+		parse = function(spec)
+			return {
+				is_success = function()
+					return true
+				end,
+				get_or_nil = function()
+					return {
+						purl = { type = "cargo", value = spec.source.id },
+						raw_source = spec.source,
+						source = vim.tbl_extend("force", { compiled = true }, spec.source),
+					}
+				end,
+			}
+		end,
+	}
+end
+
+local function mutable_compiler_fixture(purl_type, selected)
+	return {
+		parse = function(spec)
+			return {
+				is_success = function()
+					return true
+				end,
+				get_or_nil = function()
+					return {
+						purl = { type = purl_type, value = spec.source.id },
+						raw_source = spec.source,
+						source = { selected = selected.value },
+					}
+				end,
+			}
+		end,
+	}
+end
+
+local function purl_fixture()
+	return {
+		compile = function(purl)
+			return purl.value
+		end,
+	}
+end
+
+local function receipt_fixture(data)
+	return {
+		get_name = function()
+			return data.name
+		end,
+		get_schema_version = function()
+			return data.schema_version
+		end,
+		get_source = function()
+			return data.source
+		end,
+		get_registry = function()
+			return data.registry
+		end,
+		get_install_options = function()
+			return data.install_options
+		end,
+		get_links = function()
+			return data.links
+		end,
+	}
+end
+
+local function pinned_fingerprint()
+	return require("muster.mason_source").EXPECTED_FINGERPRINT
+end
+
+local function receipt_module_fixture()
+	return {
+		InstallReceipt = {
+			from_json = function(value)
+				return value
+			end,
+			get_name = function(self)
+				return self.name
+			end,
+			get_schema_version = function(self)
+				return self.schema_version
+			end,
+			get_source = function(self)
+				return self.source
+			end,
+			get_registry = function(self)
+				return self.registry
+			end,
+			get_install_options = function(self)
+				return self.install_options
+			end,
+			get_links = function(self)
+				return self.links
+			end,
+		},
+	}
+end
+
+local function optional_fixture(value)
+	return {
+		or_else = function(_, fallback)
+			return value or fallback
+		end,
+	}
+end
+
 local function fixture(definitions)
-	local location = { root = "/mason" }
-	function location:get_dir()
-		return self.root
-	end
+	local location = setmetatable({ dir = "/mason" }, {
+		__index = {
+			get_dir = function(self)
+				return self.dir
+			end,
+		},
+	})
 
 	local packages = {}
 	local installs = {}
@@ -61,14 +183,23 @@ local function fixture(definitions)
 		}, definition)
 		local package = {
 			name = definition.name,
-			spec = definition.spec or { name = name, bin = definition.bins, source = { id = "recipe:" .. name } },
+			spec = definition.spec or {
+				schema = "registry+v1",
+				name = name,
+				bin = definition.bins,
+				source = { id = "pkg:generic/" .. name .. "@1.0.0" },
+			},
 			registry = definition.registry,
 		}
 		function package:get_install_path(bound_location)
 			if definition.path then
 				return definition.path(bound_location)
 			end
-			return bound_location.root .. "/packages/" .. name
+			return bound_location:get_dir() .. "/packages/" .. name
+		end
+		function package:get_receipt(bound_location)
+			assert.equals(location, bound_location)
+			return optional_fixture(definition and definition.disk_receipt)
 		end
 		function package:is_installed(bound_location)
 			assert.equals(location, bound_location)
@@ -94,6 +225,7 @@ local function fixture(definitions)
 			return definition.installable
 		end
 		function package:install(opts, callback)
+			assert.is_false(self:is_installing())
 			live_installs[#live_installs + 1] = { package = name, location = opts.location }
 			if definition.install then
 				return definition.install(callback)
@@ -120,7 +252,9 @@ local function fixture(definitions)
 		return package
 	end
 
-	local package_module = {}
+	local package_module = {
+		DEFAULT_INSTALL_OPTS = { debug = false, force = false, strict = false },
+	}
 	function package_module:new(spec, registry_source)
 		local name = spec.name
 		local definition = definitions[name]
@@ -156,32 +290,54 @@ local function fixture(definitions)
 		packages = packages,
 		installs = installs,
 		live_installs = live_installs,
-		opts = { registry = registry, location = location, package_module = package_module },
+		opts = {
+			registry = registry,
+			location = location,
+			package_module = package_module,
+			compiler = compiler_fixture(),
+			purl = purl_fixture(),
+			receipt_module = receipt_module_fixture(),
+			_source_fingerprint = pinned_fingerprint,
+			schedule = function(callback)
+				callback()
+			end,
+			notify = function() end,
+			verify = function(_, item)
+				return vim.tbl_map(function(binary)
+					return "/mason/bin/" .. binary
+				end, item.binaries)
+			end,
+		},
 	}
 end
 
 local function precedence_fixture()
-	local location = { root = "/mason" }
-	function location:get_dir()
-		return self.root
-	end
+	local location = setmetatable({ dir = "/mason" }, {
+		__index = {
+			get_dir = function(self)
+				return self.dir
+			end,
+		},
+	})
 
 	local sources = {
 		primary = {
 			bad = {
 				registry = registry_identity("registry-primary", "source:primary"),
 				spec = {
+					schema = "registry+v1",
 					name = "bad",
 					bin = { bad = "bin/bad" },
-					source = { id = "recipe:bad", install = { command = "primary", args = { "one" } } },
+					source = { id = "pkg:generic/bad@1.0.0", install = { command = "primary", args = { "one" } } },
 				},
 			},
 			good = {
 				registry = registry_identity("registry-primary", "source:primary"),
 				spec = {
+					schema = "registry+v1",
 					name = "good",
 					bin = { good = "bin/good" },
-					source = { id = "recipe:good", install = { command = "primary", args = { "safe" } } },
+					source = { id = "pkg:generic/good@1.0.0", install = { command = "primary", args = { "safe" } } },
 				},
 			},
 		},
@@ -189,9 +345,10 @@ local function precedence_fixture()
 			bad = {
 				registry = registry_identity("registry-secondary", "source:secondary\nchanged"),
 				spec = {
+					schema = "registry+v1",
 					name = "bad",
 					bin = { bad = "bin/bad" },
-					source = { id = "recipe:bad", install = { command = "secondary", args = { "two" } } },
+					source = { id = "pkg:generic/bad@1.0.0", install = { command = "secondary", args = { "two" } } },
 				},
 			},
 		},
@@ -219,7 +376,11 @@ local function precedence_fixture()
 		}
 		function package:get_install_path(bound_location)
 			assert.equals(location, bound_location)
-			return bound_location.root .. "/packages/" .. name
+			return bound_location:get_dir() .. "/packages/" .. name
+		end
+		function package:get_receipt(bound_location)
+			assert.equals(location, bound_location)
+			return optional_fixture(definition and definition.disk_receipt)
 		end
 		function package:is_installed(bound_location)
 			assert.equals(location, bound_location)
@@ -261,7 +422,9 @@ local function precedence_fixture()
 		return package_object(source_name, name, definition)
 	end
 
-	local package_module = {}
+	local package_module = {
+		DEFAULT_INSTALL_OPTS = { debug = false, force = false, strict = false },
+	}
 	function package_module:new(spec, registry_source)
 		local package = { name = spec.name, spec = spec, registry = registry_source, install_calls = 0 }
 		function package.install(package_self, opts, callback)
@@ -279,7 +442,24 @@ local function precedence_fixture()
 		registry = registry,
 		objects = objects,
 		detached = detached,
-		opts = { registry = registry, location = location, package_module = package_module },
+		opts = {
+			registry = registry,
+			location = location,
+			package_module = package_module,
+			compiler = compiler_fixture(),
+			purl = purl_fixture(),
+			receipt_module = receipt_module_fixture(),
+			_source_fingerprint = pinned_fingerprint,
+			schedule = function(callback)
+				callback()
+			end,
+			notify = function() end,
+			verify = function(_, item)
+				return vim.tbl_map(function(binary)
+					return "/mason/bin/" .. binary
+				end, item.binaries)
+			end,
+		},
 		set_precedence = function(value)
 			precedence = value
 		end,
@@ -329,6 +509,9 @@ describe("muster.handoff.mason.prepare", function()
 			"a\\b",
 			"a\0b",
 			"a\nb",
+			"Tool",
+			"_tool",
+			"tool\226\128\174txt",
 			string.rep("x", 256),
 		}
 		for _, identifier in ipairs(invalid) do
@@ -528,6 +711,120 @@ local function prepare_batch(definitions, entries, extra_opts)
 	return plan, fx
 end
 
+local function verification_harness(binaries, overrides)
+	overrides = overrides or {}
+	local held_callback
+	local closed = false
+	local definitions = {
+		tool = {
+			bins = binaries,
+			install = function(callback)
+				held_callback = callback
+				return install_handle(function()
+					return closed
+				end)
+			end,
+		},
+	}
+	local entries = {}
+	for binary in pairs(binaries) do
+		entries[#entries + 1] = entry("a", binary, binary, "tool")
+	end
+	table.sort(entries, function(left, right)
+		return left.name < right.name
+	end)
+	local notifications = {}
+	local plan, fx = prepare_batch(definitions, entries, {
+		compiler = overrides.compiler,
+		purl = overrides.purl,
+		_source_fingerprint = overrides._source_fingerprint,
+		notify = function(message, level, opts)
+			notifications[#notifications + 1] = { message = message, level = level, opts = opts }
+		end,
+		schedule = overrides.schedule or function(callback)
+			callback()
+		end,
+		defer = overrides.defer,
+		is_windows = overrides.is_windows,
+	})
+	fx.opts.verify = false
+	fx.opts.realpath = function(path)
+		local mapped = overrides.realpaths and overrides.realpaths[path]
+		if mapped == false then
+			return nil
+		end
+		return mapped or path:gsub("^/mason", "/real/mason")
+	end
+	fx.opts.probe = function(binary)
+		local probe = overrides.probes and overrides.probes[binary]
+		if probe then
+			return probe
+		end
+		return {
+			status = "found",
+			source = "mason",
+			path = "/mason/bin/" .. binary,
+			realpath = "/real/mason/packages/tool/" .. binaries[binary],
+		}
+	end
+
+	handoff.execute(plan, fx.opts)
+	local item = plan.items[1]
+	local install_options = {
+		debug = false,
+		force = false,
+		strict = false,
+		location = fx.location,
+	}
+	local links = { bin = {} }
+	for binary, target in pairs(binaries) do
+		links.bin[overrides.is_windows and (binary .. ".cmd") or binary] = target
+	end
+	local data = {
+		name = "tool",
+		schema_version = "2.0",
+		source = {
+			type = item.spec_snapshot.schema,
+			id = item.spec_snapshot.source.id,
+			raw = vim.deepcopy(item.spec_snapshot.source),
+		},
+		registry = vim.deepcopy(item.registry_identity.serialized),
+		install_options = install_options,
+		links = links,
+	}
+	local callback_data = vim.deepcopy(data)
+	local disk_data = vim.deepcopy(data)
+	local callback_receipt = receipt_fixture(callback_data)
+	local disk_receipt = receipt_fixture(disk_data)
+	fx.packages.tool.is_installed = function()
+		return true
+	end
+	fx.packages.tool.get_receipt = function()
+		return optional_fixture(disk_receipt)
+	end
+
+	return {
+		plan = plan,
+		fx = fx,
+		item = item,
+		data = data,
+		notifications = notifications,
+		complete = function(callback_value)
+			closed = true
+			held_callback(true, callback_value or callback_receipt)
+		end,
+		callback = callback_receipt,
+		callback_data = callback_data,
+		disk = disk_receipt,
+		disk_data = disk_data,
+		set_disk = function(value)
+			fx.packages.tool.get_receipt = function()
+				return optional_fixture(value)
+			end
+		end,
+	}
+end
+
 describe("muster.handoff.mason.execute", function()
 	it("dispatches a detached prepared-spec package that cannot observe later live recipe drift", function()
 		local plan, fx = prepare_batch(
@@ -536,6 +833,7 @@ describe("muster.handoff.mason.execute", function()
 		)
 		local constructed, held_callback
 		fx.opts.package_module = {
+			DEFAULT_INSTALL_OPTS = { debug = false, force = false, strict = false },
 			new = function(_, spec_snapshot, registry_source)
 				constructed = {
 					name = spec_snapshot.name,
@@ -558,10 +856,10 @@ describe("muster.handoff.mason.execute", function()
 		assert.equals(0, #fx.live_installs, "the verified live package must never receive install")
 		assert.equals("dispatched", plan.items[1].outcome)
 		assert.is_not.equal(plan.items[1].spec_snapshot, constructed.spec)
-		assert.equals("recipe:tool", constructed.spec.source.id)
+		assert.equals("pkg:generic/tool@1.0.0", constructed.spec.source.id)
 
-		fx.packages.tool.spec.source.id = "recipe:B"
-		assert.equals("recipe:tool", constructed.spec.source.id)
+		fx.packages.tool.spec.source.id = "pkg:generic/changed@2.0.0"
+		assert.equals("pkg:generic/tool@1.0.0", constructed.spec.source.id)
 		held_callback(true, {})
 		assert.equals("completed", plan.items[1].outcome)
 	end)
@@ -574,6 +872,7 @@ describe("muster.handoff.mason.execute", function()
 		local saved = package.loaded["mason-core.package"]
 		local constructed = 0
 		package.loaded["mason-core.package"] = {
+			DEFAULT_INSTALL_OPTS = { debug = false, force = false, strict = false },
 			new = function(_, spec, registry)
 				constructed = constructed + 1
 				local detached = { name = spec.name, spec = spec, registry = registry }
@@ -624,6 +923,7 @@ describe("muster.handoff.mason.execute", function()
 			})
 			local detached_installs = {}
 			fx.opts.package_module = {
+				DEFAULT_INSTALL_OPTS = { debug = false, force = false, strict = false },
 				new = function(_, spec, registry)
 					local detached
 					if spec.name == "bad" then
@@ -699,11 +999,13 @@ describe("muster.handoff.mason.execute", function()
 		assert.equals("good", fx.detached[1].name)
 		assert.equals(1, fx.detached[1].install_calls)
 		assert.same({ "failed", "completed" }, { plan.items[1].outcome, plan.items[2].outcome })
-		assert.equals(1, #messages)
+		assert.equals(3, #messages)
 		assert.is_truthy(messages[1]:find("bad", 1, true))
 		assert.is_truthy(messages[1]:find(":MasonLog", 1, true))
-		assert.is_falsy(messages[1]:find("[%z\1-\31\127]"))
-		assert.is_true(#messages[1] <= 400)
+		for _, message in ipairs(messages) do
+			assert.is_falsy(message:find("[%z\1-\31\127]"))
+			assert.is_true(#message <= 400)
+		end
 	end)
 
 	it("dispatches only the freshly reacquired winner when precedence is unchanged", function()
@@ -808,7 +1110,7 @@ describe("muster.handoff.mason.execute", function()
 			assert.equals("good", fx.installs[1].package, name)
 			assert.equals("failed", plan.items[1].outcome, name)
 			assert.equals("completed", plan.items[2].outcome, name)
-			assert.equals(1, #notifications, name)
+			assert.equals(3, #notifications, name)
 		end
 	end)
 
@@ -903,9 +1205,15 @@ describe("muster.handoff.mason.execute", function()
 			end
 
 			handoff.execute(plan, fx.opts)
-			assert.same({ "unknown", "completed" }, { plan.items[1].outcome, plan.items[2].outcome }, case_name)
-			assert.is_nil(rawget(fx.packages.bad, "install_handle"), case_name)
-			assert.equals(2, #fx.installs, case_name)
+			if case_name == "invalid" then
+				assert.same({ "unknown", "completed" }, { plan.items[1].outcome, plan.items[2].outcome }, case_name)
+				assert.is_false(fx.packages.bad.install_handle:is_closed())
+				assert.equals(2, #fx.installs, case_name)
+			else
+				assert.same({ "failed", "completed" }, { plan.items[1].outcome, plan.items[2].outcome }, case_name)
+				assert.is_nil(rawget(fx.packages.bad, "install_handle"), case_name)
+				assert.equals(1, #fx.installs, case_name)
+			end
 		end
 	end)
 
@@ -965,7 +1273,7 @@ describe("muster.handoff.mason.execute", function()
 		})
 		handoff.execute(plan, fx.opts)
 		assert.equals("completed", plan.items[1].outcome)
-		assert.same({ "a_ls", "z_ls" }, enabled)
+		assert.same({}, enabled)
 	end)
 
 	it("marks callback-then-throw and throw-after-dispatch unknown, suppresses effects, and continues", function()
@@ -997,8 +1305,10 @@ describe("muster.handoff.mason.execute", function()
 			assert.equals("unknown", plan.items[1].outcome)
 			assert.equals("completed", plan.items[2].outcome)
 			assert.same({}, enabled)
-			assert.equals(1, #notifications)
-			assert.is_truthy(notifications[1]:find("outcome unknown; inspect :MasonLog", 1, true))
+			assert.equals(4, #notifications)
+			assert.is_true(vim.iter(notifications):any(function(message)
+				return message:find("outcome unknown; inspect :MasonLog", 1, true) ~= nil
+			end))
 		end
 	end)
 
@@ -1026,10 +1336,10 @@ describe("muster.handoff.mason.execute", function()
 		})
 		handoff.execute(plan, fx.opts)
 		assert.equals("unknown", plan.items[1].outcome)
-		assert.equals(1, effects)
+		assert.equals(2, effects)
 		late_callback(true, {})
 		assert.equals("unknown", plan.items[1].outcome)
-		assert.equals(1, effects)
+		assert.equals(2, effects)
 	end)
 
 	it("guards effects against duplicate scheduler execution and fallback", function()
@@ -1052,7 +1362,7 @@ describe("muster.handoff.mason.execute", function()
 			}
 		)
 		handoff.execute(plan, fx.opts)
-		assert.equals(1, effects)
+		assert.equals(0, effects)
 	end)
 
 	it("bridges callback effects through scheduler then deferred fallback", function()
@@ -1074,10 +1384,11 @@ describe("muster.handoff.mason.execute", function()
 			}
 		)
 		handoff.execute(plan, fx.opts)
-		assert.equals("completed", plan.items[1].outcome)
+		assert.equals("verifying", plan.items[1].outcome)
 		assert.same({}, effects)
 		deferred[1]()
-		assert.same({ "tool_ls" }, effects)
+		assert.equals("completed", plan.items[1].outcome)
+		assert.same({}, effects)
 	end)
 
 	it("preserves terminal ledger truth and runs no unsafe effect when both bridges reject", function()
@@ -1105,8 +1416,8 @@ describe("muster.handoff.mason.execute", function()
 				end,
 			})
 			handoff.execute(plan, fx.opts)
-			assert.equals(callback_result[1] and "completed" or "failed", plan.items[1].outcome)
-			assert.equals(0, effects)
+			assert.equals(callback_result[1] and "installed_unverified" or "failed", plan.items[1].outcome)
+			assert.equals(1, effects)
 		end
 	end)
 
@@ -1141,7 +1452,7 @@ describe("muster.handoff.mason.execute", function()
 		assert.has_no.errors(function()
 			handoff.execute(plan, fx.opts)
 		end)
-		assert.same({ "b_ls" }, enabled)
+		assert.same({}, enabled)
 		assert.same({ "failed", "completed" }, { plan.items[1].outcome, plan.items[2].outcome })
 	end)
 
@@ -1154,7 +1465,7 @@ describe("muster.handoff.mason.execute", function()
 			callback()
 		end
 
-		local malicious_package = "tool\n\27\0" .. string.rep("x", 400)
+		local malicious_package = "tool\n\27\0\226\128\174" .. string.rep("x", 400)
 		local package_plan, package_fx = prepare_batch(
 			{ tool = { bins = { tool = "bin/tool" } } },
 			{ entry("a", "tool", "tool", "tool") },
@@ -1168,18 +1479,610 @@ describe("muster.handoff.mason.execute", function()
 			tool = {
 				bins = { tool = "bin/tool" },
 				install = function(callback)
-					callback(false, "bad\n\27\0" .. string.rep("y", 400))
+					callback(false, "bad\n\27\0\226\128\174" .. string.rep("y", 400))
 				end,
 			},
 		}, { entry("a", "tool", "tool", "tool") }, { notify = notify, schedule = schedule })
 		handoff.execute(error_plan, error_fx.opts)
 
-		assert.equals(2, #messages)
+		assert.equals(3, #messages)
 		for _, message in ipairs(messages) do
 			assert.is_falsy(message:find("\n", 1, true))
 			assert.is_falsy(message:find("\27", 1, true))
 			assert.is_falsy(message:find("\0", 1, true))
+			assert.is_falsy(message:find("\226\128\174", 1, true))
 			assert.is_true(#message <= 400)
 		end
+	end)
+end)
+
+describe("muster.handoff.mason pre-dispatch security contract", function()
+	it("feature-checks receipt getters and Package Optional access before dispatch", function()
+		local cases = {
+			function(fx)
+				fx.opts.receipt_module = { InstallReceipt = { from_json = function() end } }
+			end,
+			function(fx)
+				fx.packages.tool.get_receipt = nil
+			end,
+			function(fx)
+				fx.packages.tool.get_receipt = function()
+					return {}
+				end
+			end,
+		}
+		for index, mutate in ipairs(cases) do
+			local plan, fx = prepare_batch(
+				{ tool = { bins = { tool = "bin/tool" } } },
+				{ entry("a", "tool", "tool", "tool") }
+			)
+			mutate(fx)
+			handoff.execute(plan, fx.opts)
+			assert.equals(0, #fx.installs, index)
+			assert.equals("failed", plan.items[1].outcome, index)
+		end
+	end)
+
+	it("owns the canonical reservation before a reentrant start notifier can install", function()
+		local plan, fx = prepare_batch(
+			{ tool = { bins = { tool = "bin/tool" } } },
+			{ entry("a", "tool", "tool", "tool") }
+		)
+		local canonical = fx.packages.tool
+		local external_ok
+		fx.opts.notify = function(message)
+			if message == "muster: installing tool via Mason" then
+				assert.is_true(canonical:is_installing())
+				external_ok = pcall(canonical.install, canonical, { location = fx.location }, function() end)
+			end
+		end
+		handoff.execute(plan, fx.opts)
+		assert.is_false(external_ok)
+		assert.equals(0, #fx.live_installs)
+		assert.equals(1, #fx.installs)
+	end)
+
+	it("blocks a competing canonical install from a detached handle listener", function()
+		local canonical
+		local external_ok
+		local listener_running = false
+		local plan, fx
+		plan, fx = prepare_batch({
+			tool = {
+				bins = { tool = "bin/tool" },
+				install = function(callback)
+					if not listener_running then
+						listener_running = true
+						external_ok = pcall(canonical.install, canonical, { location = fx.location }, function() end)
+					end
+					callback(true, {})
+					return install_handle()
+				end,
+			},
+		}, { entry("a", "tool", "tool", "tool") })
+		canonical = fx.packages.tool
+		handoff.execute(plan, fx.opts)
+		assert.is_false(external_ok)
+		assert.equals(0, #fx.live_installs)
+		assert.equals(1, #fx.installs)
+	end)
+
+	it("rejects a handle-listener overwrite unless the canonical slot still holds the exact sentinel", function()
+		local canonical
+		local foreign = install_handle(function()
+			return false
+		end)
+		local actual = install_handle()
+		local plan, fx = prepare_batch({
+			tool = {
+				bins = { tool = "bin/tool" },
+				install = function(callback)
+					assert.is_true(canonical:is_installing())
+					canonical.install_handle = foreign
+					callback(true, {})
+					return actual
+				end,
+			},
+		}, { entry("a", "tool", "tool", "tool") })
+		canonical = fx.packages.tool
+		handoff.execute(plan, fx.opts)
+		assert.equals("unknown", plan.items[1].outcome)
+		assert.equals(foreign, canonical.install_handle)
+	end)
+end)
+
+describe("muster.handoff.mason receipt and path verification", function()
+	it("completes with a real pinned schema-2 callback receipt and JSON disk roundtrip", function()
+		with_pinned_mason(function()
+			local compiler = require("mason-core.installer.compiler")
+			local Purl = require("mason-core.purl")
+			local receipt_module = require("mason-core.receipt")
+			local closed = false
+			local held_callback
+			local spec = {
+				schema = "registry+v1",
+				name = "tool",
+				bin = { tool = "bin/tool" },
+				source = { id = "pkg:composer/vendor/tool@1.0.0" },
+			}
+			local plan, fx = prepare_batch({
+				tool = {
+					bins = spec.bin,
+					spec = spec,
+					install = function(callback)
+						held_callback = callback
+						return install_handle(function()
+							return closed
+						end)
+					end,
+				},
+			}, { entry("a", "tool", "tool", "tool") })
+			fx.opts.compiler = compiler
+			fx.opts.purl = Purl
+			fx.opts.receipt_module = receipt_module
+			fx.opts._source_fingerprint = function()
+				return require("muster.mason_source").fingerprint_root(vim.env.MUSTER_MASON_NVIM_PATH)
+			end
+			fx.opts.verify = false
+			fx.opts.realpath = function(path)
+				return path:gsub("^/mason", "/real/mason")
+			end
+			fx.opts.probe = function()
+				return {
+					status = "found",
+					source = "mason",
+					path = "/mason/bin/tool",
+					realpath = "/real/mason/packages/tool/bin/tool",
+				}
+			end
+
+			handoff.execute(plan, fx.opts)
+			assert.equals("dispatched", plan.items[1].outcome)
+			local install_options =
+				vim.tbl_extend("force", fx.opts.package_module.DEFAULT_INSTALL_OPTS, { location = fx.location })
+			local callback_receipt = receipt_module.InstallReceiptBuilder
+				:new()
+				:with_name("tool")
+				:with_start_time(1, 0)
+				:with_completion_time(2, 0)
+				:with_source({ type = spec.schema, id = spec.source.id, raw = spec.source })
+				:with_install_options(install_options)
+				:with_registry(plan.items[1].registry_identity.serialized)
+				:with_link("bin", "tool", "bin/tool")
+				:build()
+			local disk_receipt = receipt_module.InstallReceipt.from_json(vim.json.decode(callback_receipt:to_json()))
+			fx.packages.tool.is_installed = function()
+				return true
+			end
+			fx.packages.tool.get_receipt = function()
+				return optional_fixture(disk_receipt)
+			end
+			closed = true
+			held_callback(true, callback_receipt)
+			assert.equals("completed", plan.items[1].outcome, plan.items[1].error)
+		end)
+	end)
+
+	it("fails closed when pinned npm compiler settings mutate after capture", function()
+		with_pinned_mason(function()
+			local compiler = require("mason-core.installer.compiler")
+			local Purl = require("mason-core.purl")
+			local receipt_module = require("mason-core.receipt")
+			local settings = require("mason.settings")
+			local original_args = settings.current.npm.install_args
+			settings.current.npm.install_args = { "--captured" }
+			local closed = false
+			local held_callback
+			local spec = {
+				schema = "registry+v1",
+				name = "tool",
+				bin = { tool = "bin/tool" },
+				source = { id = "pkg:npm/tool@1.0.0" },
+			}
+			local plan, fx = prepare_batch({
+				tool = {
+					bins = spec.bin,
+					spec = spec,
+					install = function(callback)
+						held_callback = callback
+						return install_handle(function()
+							return closed
+						end)
+					end,
+				},
+			}, { entry("a", "tool", "tool", "tool") })
+			fx.opts.compiler = compiler
+			fx.opts.purl = Purl
+			fx.opts.receipt_module = receipt_module
+			fx.opts._source_fingerprint = function()
+				return require("muster.mason_source").fingerprint_root(vim.env.MUSTER_MASON_NVIM_PATH)
+			end
+			fx.opts.verify = false
+			fx.opts.notify = function(message)
+				if message == "muster: installing tool via Mason" then
+					settings.current.npm.install_args = { "--mutated" }
+				end
+			end
+			fx.opts.realpath = function(path)
+				return path:gsub("^/mason", "/real/mason")
+			end
+			fx.opts.probe = function()
+				return {
+					status = "found",
+					source = "mason",
+					path = "/mason/bin/tool",
+					realpath = "/real/mason/packages/tool/bin/tool",
+				}
+			end
+
+			local ok, err = pcall(function()
+				handoff.execute(plan, fx.opts)
+				assert.same({ "--captured" }, plan.items[1]._compiler_state.source.npm.extra_args)
+				local install_options =
+					vim.tbl_extend("force", fx.opts.package_module.DEFAULT_INSTALL_OPTS, { location = fx.location })
+				local callback_receipt = receipt_module.InstallReceiptBuilder
+					:new()
+					:with_name("tool")
+					:with_start_time(1, 0)
+					:with_completion_time(2, 0)
+					:with_source({ type = spec.schema, id = spec.source.id, raw = spec.source })
+					:with_install_options(install_options)
+					:with_registry(plan.items[1].registry_identity.serialized)
+					:with_link("bin", "tool", "bin/tool")
+					:build()
+				local disk_receipt =
+					receipt_module.InstallReceipt.from_json(vim.json.decode(callback_receipt:to_json()))
+				fx.packages.tool.is_installed = function()
+					return true
+				end
+				fx.packages.tool.get_receipt = function()
+					return optional_fixture(disk_receipt)
+				end
+				closed = true
+				held_callback(true, callback_receipt)
+				assert.equals("installed_unverified", plan.items[1].outcome)
+			end)
+			settings.current.npm.install_args = original_args
+			assert.is_true(ok, err)
+		end)
+	end)
+
+	it("completes only for matching schema-2 provenance and the exact Unix Mason link target", function()
+		local harness = verification_harness({ tool = "bin/tool" })
+		assert.equals("dispatched", harness.item.outcome)
+		assert.same({
+			message = "muster: installing tool via Mason",
+			level = vim.log.levels.INFO,
+			opts = { title = "muster" },
+		}, harness.notifications[1])
+
+		harness.complete()
+		assert.equals("completed", harness.item.outcome, harness.item.error)
+		assert.equals(2, #harness.notifications)
+		assert.equals(vim.log.levels.INFO, harness.notifications[2].level)
+		assert.equals("muster: installed tool via Mason: /mason/bin/tool", harness.notifications[2].message)
+	end)
+
+	it("normalizes the callback receipt synchronously before scheduled verification", function()
+		local effects = {}
+		local harness = verification_harness({ tool = "bin/tool" }, {
+			schedule = function(callback)
+				effects[#effects + 1] = callback
+			end,
+		})
+		harness.complete()
+		assert.equals("verifying", harness.item.outcome)
+		harness.callback_data.source.id = "pkg:generic/mutated@9.9.9"
+		effects[1]()
+		assert.equals("completed", harness.item.outcome)
+	end)
+
+	it("never attests generic or openvsx across an adversarial platform-selection interval", function()
+		for _, purl_type in ipairs({ "generic", "openvsx" }) do
+			local selected = { value = "platform-a" }
+			local compiler = mutable_compiler_fixture(purl_type, selected)
+			local harness = verification_harness({ tool = "bin/tool" }, { compiler = compiler })
+			selected.value = "platform-b"
+			local actual = compiler.parse(harness.item.spec_snapshot):get_or_nil()
+			assert.equals("platform-b", actual.source.selected)
+			selected.value = "platform-a"
+			harness.complete()
+			assert.equals("installed_unverified", harness.item.outcome, purl_type)
+		end
+	end)
+
+	it("rejects API-compatible compiler runtimes with mismatched or unreadable source identity", function()
+		for _, fingerprint in ipairs({
+			function()
+				return string.rep("0", 64)
+			end,
+			function()
+				error("source root unreadable")
+			end,
+		}) do
+			local harness = verification_harness({ tool = "bin/tool" }, {
+				_source_fingerprint = fingerprint,
+			})
+			harness.complete()
+			assert.equals("installed_unverified", harness.item.outcome)
+		end
+	end)
+
+	it("requires every binary in a package to resolve through its exact Mason link and target", function()
+		local harness = verification_harness({ alpha = "bin/alpha", beta = "bin/beta" }, {
+			probes = {
+				beta = {
+					status = "found",
+					source = "mason",
+					path = "/external/bin/beta",
+					realpath = "/real/mason/packages/tool/bin/beta",
+				},
+			},
+		})
+		harness.complete()
+		assert.equals("installed_unverified", harness.item.outcome)
+		assert.equals(vim.log.levels.ERROR, harness.notifications[2].level)
+	end)
+
+	it("rejects an exact Mason link that resolves to a different package target", function()
+		local harness = verification_harness({ tool = "bin/tool" }, {
+			probes = {
+				tool = {
+					status = "found",
+					source = "mason",
+					path = "/mason/bin/tool",
+					realpath = "/real/mason/packages/tool/bin/other",
+				},
+			},
+		})
+		harness.complete()
+		assert.equals("installed_unverified", harness.item.outcome)
+	end)
+
+	it("rejects unsafe receipt targets and canonical package prefix collisions", function()
+		for _, target in ipairs({ ".", "/outside/tool", "../outside/tool", "bin/../../outside/tool", "C:/outside/tool" }) do
+			local harness = verification_harness({ tool = target })
+			harness.complete()
+			assert.equals("installed_unverified", harness.item.outcome, target)
+		end
+
+		local harness = verification_harness({ tool = "bin/tool" }, {
+			realpaths = {
+				["/mason/packages/tool"] = "/real/mason-other/packages/tool",
+			},
+		})
+		harness.complete()
+		assert.equals("installed_unverified", harness.item.outcome)
+	end)
+
+	it("rejects callback/disk, registry, source, option, schema, and link mismatches", function()
+		local mutations = {
+			function(harness)
+				harness:set_disk(receipt_fixture(vim.tbl_deep_extend("force", vim.deepcopy(harness.data), {
+					name = "other",
+				})))
+			end,
+			function(harness)
+				harness.data.registry = { id = "other" }
+			end,
+			function(harness)
+				harness.data.source.id = "pkg:generic/other@2.0.0"
+			end,
+			function(harness)
+				harness.data.install_options.force = true
+			end,
+			function(harness)
+				harness.data.install_options.location = { dir = string.rep("x", 4097) }
+			end,
+			function(harness)
+				harness.data.schema_version = "1.1"
+			end,
+			function(harness)
+				harness.data.links.bin = {}
+			end,
+		}
+		for index, mutate in ipairs(mutations) do
+			local harness = verification_harness({ tool = "bin/tool" })
+			mutate(harness)
+			harness.complete(receipt_fixture(vim.deepcopy(harness.data)))
+			assert.equals("installed_unverified", harness.item.outcome, index)
+		end
+	end)
+
+	it("keeps Windows success installed-unverified after validating the schema-2 .cmd receipt key", function()
+		local harness = verification_harness({ tool = "bin/tool.exe" }, { is_windows = true })
+		assert.is_truthy(harness.data.links.bin["tool.cmd"])
+		harness.complete()
+		assert.equals("installed_unverified", harness.item.outcome)
+		assert.equals(
+			"muster: Mason installed tool, but Windows wrapper verification is not supported yet",
+			harness.notifications[2].message
+		)
+		assert.equals(vim.log.levels.ERROR, harness.notifications[2].level)
+	end)
+
+	it("emits exact callback-failure and unknown lifecycle errors independently of summary settings", function()
+		local config_mod = require("muster.config")
+		config_mod.reset()
+		config_mod.setup({ notify_on_startup = false })
+		for _, case in ipairs({
+			{
+				install = function(callback)
+					callback(false, "installer rejected")
+					return install_handle()
+				end,
+				outcome = "failed",
+				message = "muster: Mason install tool failed: installer rejected; inspect :MasonLog",
+			},
+			{
+				install = function()
+					return "invalid handle"
+				end,
+				outcome = "unknown",
+				message = "muster: Mason install tool outcome unknown; inspect :MasonLog",
+			},
+		}) do
+			local notifications = {}
+			local plan, fx = prepare_batch(
+				{ tool = { bins = { tool = "bin/tool" }, install = case.install } },
+				{ entry("a", "tool", "tool", "tool") },
+				{
+					notify = function(message, level, opts)
+						notifications[#notifications + 1] = { message = message, level = level, opts = opts }
+					end,
+				}
+			)
+			handoff.execute(plan, fx.opts)
+			assert.equals(case.outcome, plan.items[1].outcome)
+			assert.equals(2, #notifications)
+			assert.equals(vim.log.levels.INFO, notifications[1].level)
+			assert.equals(vim.log.levels.ERROR, notifications[2].level)
+			assert.equals(case.message, notifications[2].message)
+			assert.same({ title = "muster" }, notifications[2].opts)
+		end
+		config_mod.reset()
+	end)
+
+	it("fails compiler feature incompatibility before dispatch", function()
+		local plan, fx = prepare_batch(
+			{ tool = { bins = { tool = "bin/tool" } } },
+			{ entry("a", "tool", "tool", "tool") },
+			{
+				compiler = {},
+				notify = function() end,
+			}
+		)
+		handoff.execute(plan, fx.opts)
+		assert.equals("failed", plan.items[1].outcome)
+		assert.equals(0, #fx.installs)
+	end)
+end)
+
+describe("muster.handoff.mason verified lifecycle contract", function()
+	it("reserves dispatch before a reentrant or throwing start notifier", function()
+		local plan, fx = prepare_batch(
+			{ tool = { bins = { tool = "bin/tool" } } },
+			{ entry("a", "tool", "tool", "tool") }
+		)
+		local notices = 0
+		fx.opts.notify = function(message, level, opts)
+			if message == "muster: installing tool via Mason" then
+				notices = notices + 1
+				assert.equals("dispatched", plan.items[1].outcome)
+				assert.equals(vim.log.levels.INFO, level)
+				assert.same({ title = "muster" }, opts)
+				handoff.execute(plan, fx.opts)
+				error("notifier rejected")
+			end
+		end
+
+		assert.has_no.errors(function()
+			handoff.execute(plan, fx.opts)
+		end)
+		assert.equals(1, #fx.installs)
+		assert.equals(1, notices)
+	end)
+
+	it("snapshots callback receipts and enters verifying before scheduled verification", function()
+		local scheduled
+		local callback_receipt = { marker = "before" }
+		local plan, fx = prepare_batch({
+			tool = {
+				bins = { tool = "bin/tool" },
+				install = function(callback)
+					callback(true, callback_receipt)
+				end,
+			},
+		}, { entry("a", "tool", "tool", "tool") }, {
+			schedule = function(callback)
+				scheduled = callback
+			end,
+		})
+
+		fx.opts.verify = false
+		handoff.execute(plan, fx.opts)
+		assert.equals("verifying", plan.items[1].outcome)
+		callback_receipt.marker = "after"
+		assert.is_function(scheduled)
+		scheduled()
+		assert.equals("installed_unverified", plan.items[1].outcome)
+	end)
+
+	it("never enables LSP directly after a successful callback", function()
+		local enabled = 0
+		local plan, fx = prepare_batch(
+			{ tool = { bins = { tool = "bin/tool" } } },
+			{ entry("lsp", "tool_ls", "tool", "tool") },
+			{
+				lsp_enable = function()
+					enabled = enabled + 1
+				end,
+				schedule = function(callback)
+					callback()
+				end,
+			}
+		)
+		handoff.execute(plan, fx.opts)
+		assert.equals(0, enabled)
+	end)
+
+	it("fails closed on Windows callback success", function()
+		local plan, fx = prepare_batch(
+			{ tool = { bins = { tool = "bin/tool" } } },
+			{ entry("a", "tool", "tool", "tool") },
+			{
+				is_windows = true,
+				verify = function()
+					return nil, "Windows wrapper verification is not supported yet"
+				end,
+				schedule = function(callback)
+					callback()
+				end,
+			}
+		)
+		handoff.execute(plan, fx.opts)
+		assert.equals("installed_unverified", plan.items[1].outcome)
+		assert.is_truthy(plan.items[1].error:find("Windows wrapper verification", 1, true))
+	end)
+
+	it("expires dispatched and verifying items once and permanently gates late work", function()
+		local callback, effects
+		effects = {}
+		local notices = {}
+		local plan, fx = prepare_batch({
+			waiting = {
+				bins = { waiting = "bin/waiting" },
+				install = function(cb)
+					callback = cb
+				end,
+			},
+			checking = {
+				bins = { checking = "bin/checking" },
+				install = function(cb)
+					cb(true, {})
+				end,
+			},
+		}, { entry("a", "waiting", "waiting", "waiting"), entry("a", "checking", "checking", "checking") }, {
+			notify = function(message, level)
+				notices[#notices + 1] = { message = message, level = level }
+			end,
+			schedule = function(cb)
+				effects[#effects + 1] = cb
+			end,
+		})
+		handoff.execute(plan, fx.opts)
+		assert.same({ "verifying", "dispatched" }, { plan.items[1].outcome, plan.items[2].outcome })
+
+		handoff.expire(plan, fx.opts)
+		assert.same({ "installed_unverified", "unknown" }, { plan.items[1].outcome, plan.items[2].outcome })
+		for index = 2, #effects do
+			effects[index]()
+		end
+		local notice_count = #notices
+		callback(true, {})
+		effects[1]()
+		handoff.expire(plan, fx.opts)
+		assert.same({ "installed_unverified", "unknown" }, { plan.items[1].outcome, plan.items[2].outcome })
+		assert.equals(notice_count, #notices)
 	end)
 end)

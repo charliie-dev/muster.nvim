@@ -120,6 +120,17 @@ function M.check()
 			elseif status.state == "failed" then
 				vim.health.error("the automatic startup run failed: " .. tostring(status.reason or "unknown failure"))
 			end
+			for _, item in ipairs((status.mason and status.mason.items) or {}) do
+				local message = ("Mason package %s: %s"):format(item.package, item.outcome)
+				if item.reason then
+					message = message .. " — " .. item.reason
+				end
+				if item.outcome == "failed" or item.outcome == "unknown" or item.outcome == "installed_unverified" then
+					vim.health.error(message)
+				else
+					vim.health.info(message)
+				end
+			end
 		end
 	end
 

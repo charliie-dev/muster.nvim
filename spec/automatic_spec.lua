@@ -425,4 +425,112 @@ describe("automatic Mason pipeline", function()
 			assert.is_truthy(value.notes[1]:find(fixture.text, 1, true))
 		end
 	end)
+
+	it("expires and gates an overlapping run before dropping its live plan", function()
+		local plans = {
+			{ enabled = true, items = { { package = "old", outcome = "planned" } } },
+			{ enabled = true, items = { { package = "new", outcome = "planned" } } },
+		}
+		local prepared = 0
+		local old_callback
+		local automatic, opts = harness()
+		opts.handoff.prepare = function()
+			prepared = prepared + 1
+			return plans[prepared]
+		end
+		opts.handoff.execute = function(plan)
+			plan.items[1].outcome = "dispatched"
+			if plan == plans[1] then
+				old_callback = function()
+					if not plan.items[1].deadline_reached then
+						plan.items[1].outcome = "completed"
+					end
+				end
+			end
+		end
+		opts.handoff.expire = function(plan)
+			plan.items[1].deadline_reached = true
+			plan.items[1].outcome = "unknown"
+			plan.items[1].error = "Mason install did not complete before the observation deadline"
+		end
+		opts.deadline_timer_factory = function()
+			return { start = function() end, stop = function() end, close = function() end }
+		end
+
+		automatic.run(nil, opts)
+		automatic.run(nil, opts)
+		old_callback()
+		assert.equals("unknown", plans[1].items[1].outcome)
+		assert.is_true(plans[1].items[1].deadline_reached)
+		assert.equals("new", automatic.status().mason.items[1].package)
+	end)
+
+	it("invokes the handoff deadline once and publishes its live terminal transition", function()
+		local deadline
+		local expires = 0
+		local plan = {
+			enabled = true,
+			items = { { package = "tool", outcome = "dispatched" } },
+		}
+		local automatic, opts = harness()
+		opts.handoff.prepare = function()
+			return plan
+		end
+		opts.handoff.execute = function() end
+		opts.handoff.expire = function(value)
+			expires = expires + 1
+			value.items[1].outcome = "unknown"
+			value.items[1].error = "Mason install did not complete before the observation deadline"
+		end
+		opts.deadline_timer_factory = function()
+			return {
+				start = function(_, _, _, callback)
+					deadline = callback
+				end,
+				stop = function() end,
+				close = function() end,
+			}
+		end
+		automatic.run(nil, opts)
+		assert.equals("dispatched", automatic.status().mason.items[1].outcome)
+		deadline()
+		deadline()
+		assert.equals(1, expires)
+		assert.equals("unknown", automatic.status().mason.items[1].outcome)
+	end)
+
+	it("derives delayed Mason status from the retained live plan without raw fields", function()
+		local plan = {
+			enabled = true,
+			items = {
+				{
+					package = "tool",
+					outcome = "dispatched",
+					error = nil,
+					spec_snapshot = { secret = "recipe" },
+					install_path = "/secret/path",
+				},
+			},
+		}
+		local automatic, opts = harness()
+		opts.handoff.prepare = function()
+			return plan
+		end
+		opts.handoff.execute = function() end
+		automatic.run(nil, opts)
+
+		local status = automatic.status()
+		assert.same({ package = "tool", outcome = "dispatched" }, status.mason.items[1])
+		assert.is_nil(status.mason.items[1].spec_snapshot)
+		assert.is_nil(status.mason.items[1].install_path)
+
+		plan.items[1].outcome = "installed_unverified"
+		plan.items[1].error = "bridge \226\128\174rejected\n/secret/path"
+		status = automatic.status()
+		assert.same({
+			package = "tool",
+			outcome = "installed_unverified",
+			reason = "bridge rejected?/secret/path",
+		}, status.mason.items[1])
+	end)
 end)

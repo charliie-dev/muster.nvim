@@ -3,6 +3,8 @@
 
 local M = {}
 
+local sanitize = require("muster.text").sanitize
+
 local REASON = {
 	identifier = "invalid Mason package identifier",
 	mapping = "Mason binary mapping changed or is ambiguous",
@@ -11,28 +13,8 @@ local REASON = {
 	state = "Mason package state query failed",
 }
 
-local function sanitize(value, limit)
-	local ok, text = pcall(tostring, value or "unknown")
-	if not ok then
-		text = "unknown"
-	end
-	text = text:gsub("[%z\1-\31\127]", "?")
-	limit = limit or 200
-	if #text > limit then
-		text = text:sub(1, math.max(0, limit - 3)) .. "..."
-	end
-	return text
-end
-
 local function valid_identifier(value)
-	return type(value) == "string"
-		and value ~= ""
-		and #value <= 255
-		and value ~= "."
-		and value ~= ".."
-		and not value:find("[%z\1-\31\127/\\]")
-		and not value:match("^[/\\]")
-		and not value:match("^[A-Za-z]:")
+	return type(value) == "string" and #value <= 128 and value:match("^[a-z0-9][a-z0-9._-]*$") ~= nil
 end
 
 local function clone(value, seen)
@@ -328,11 +310,41 @@ function M.prepare(result, opts)
 end
 
 local function defaults(opts)
+	local package_module = opts.package_module or require("mason-core.package")
+	local compiler = opts.compiler or require("mason-core.installer.compiler")
+	local purl = opts.purl or require("mason-core.purl")
+	local receipt_module = opts.receipt_module or require("mason-core.receipt")
+	local mason_source = require("muster.mason_source")
+	local source_fingerprint = opts._source_fingerprint
+		or function()
+			return mason_source.fingerprint_runtime({
+				compiler = compiler,
+				package_module = package_module,
+				purl = purl,
+				receipt = receipt_module.InstallReceipt,
+			})
+		end
 	return {
 		registry = get_registry(opts),
-		package_module = opts.package_module or require("mason-core.package"),
+		package_module = package_module,
 		notify = opts.notify or vim.notify,
-		lsp_enable = opts.lsp_enable or vim.lsp.enable,
+		schedule = opts.schedule or vim.schedule,
+		defer = opts.defer or vim.defer_fn,
+		probe = opts.probe or require("muster.probe").resolve,
+		realpath = opts.realpath or vim.uv.fs_realpath,
+		is_windows = opts.is_windows == true or (opts.is_windows == nil and vim.fn.has("win32") == 1),
+		compiler = compiler,
+		purl = purl,
+		receipt_module = receipt_module,
+		source_fingerprint = source_fingerprint,
+		expected_fingerprint = mason_source.EXPECTED_FINGERPRINT,
+		verify = opts.verify,
+	}
+end
+
+local function notification_runtime(opts)
+	return {
+		notify = opts.notify or vim.notify,
 		schedule = opts.schedule or vim.schedule,
 		defer = opts.defer or vim.defer_fn,
 	}
@@ -354,8 +366,12 @@ local function bridge(runtime, effect)
 	return pcall(runtime.defer, guarded_effect, 0)
 end
 
-local function notify(runtime, message)
-	pcall(runtime.notify, sanitize(message, 400), vim.log.levels.ERROR, { title = "muster" })
+local function notify(runtime, message, level)
+	pcall(runtime.notify, sanitize(message, 400), level, { title = "muster" })
+end
+
+local function notify_start(runtime, item)
+	notify(runtime, ("muster: installing %s via Mason"):format(sanitize(item.package, 120)), vim.log.levels.INFO)
 end
 
 local function failure_effect(runtime, item, detail)
@@ -365,7 +381,8 @@ local function failure_effect(runtime, item, detail)
 			("muster: Mason install %s failed: %s; inspect :MasonLog"):format(
 				sanitize(item.package, 120),
 				sanitize(detail, 200)
-			)
+			),
+			vim.log.levels.ERROR
 		)
 	end
 end
@@ -374,16 +391,36 @@ local function unknown_effect(runtime, item)
 	return function()
 		notify(
 			runtime,
-			("muster: Mason install %s outcome unknown; inspect :MasonLog"):format(sanitize(item.package, 120))
+			("muster: Mason install %s outcome unknown; inspect :MasonLog"):format(sanitize(item.package, 120)),
+			vim.log.levels.ERROR
 		)
 	end
 end
 
-local function success_effect(runtime, item)
+local function unverified_effect(runtime, item, reason)
 	return function()
-		for _, name in ipairs(item.lsp_names) do
-			pcall(runtime.lsp_enable, name)
+		local message
+		if reason == "Windows wrapper verification is not supported yet" then
+			message = ("muster: Mason installed %s, but Windows wrapper verification is not supported yet"):format(
+				sanitize(item.package, 120)
+			)
+		else
+			message = ("muster: Mason installed %s, but verification failed: %s; inspect :MasonLog"):format(
+				sanitize(item.package, 120),
+				sanitize(reason, 180)
+			)
 		end
+		notify(runtime, message, vim.log.levels.ERROR)
+	end
+end
+
+local function success_effect(runtime, item, paths)
+	return function()
+		notify(
+			runtime,
+			("muster: installed %s via Mason: %s"):format(sanitize(item.package, 120), table.concat(paths, ", ")),
+			vim.log.levels.INFO
+		)
 	end
 end
 
@@ -393,7 +430,7 @@ local function fail_item(runtime, item, detail)
 	bridge(runtime, failure_effect(runtime, item, detail))
 end
 
-local function revalidate(plan, item, registry, opts)
+local function revalidate(plan, item, registry, opts, installed_expected)
 	if not valid_identifier(item.package) then
 		error(REASON.identifier)
 	end
@@ -418,39 +455,76 @@ local function revalidate(plan, item, registry, opts)
 		error("Mason package install path changed")
 	end
 	local installed, installing, installable = package_state(package, plan.location)
-	if installed then
-		error("package became installed while binary is missing")
-	elseif installing then
-		error("package installation is already in progress")
-	elseif not installable then
-		error("package is no longer installable")
+	if installed_expected then
+		if not installed then
+			error("Mason package is not installed after success callback")
+		elseif installing then
+			error("Mason package handle remains open after success callback")
+		end
+	else
+		if installed then
+			error("package became installed while binary is missing")
+		elseif installing then
+			error("package installation is already in progress")
+		elseif not installable then
+			error("package is no longer installable")
+		end
 	end
 	return package
 end
 
-local function reserve_install_handle(canonical, handle)
+local function valid_handle(handle)
 	local kind = type(handle)
 	if kind ~= "table" and kind ~= "userdata" then
-		error("Mason install returned an invalid handle")
+		return false
 	end
 	local ok_method, is_closed = pcall(function()
 		return handle.is_closed
 	end)
-	if not ok_method or type(is_closed) ~= "function" then
+	return ok_method and type(is_closed) == "function"
+end
+
+local function reserve_canonical(canonical)
+	local existing = canonical.install_handle
+	if existing ~= nil then
+		if not valid_handle(existing) then
+			error("Mason canonical package has an invalid install reservation")
+		end
+		local ok_closed, closed = pcall(existing.is_closed, existing)
+		if not ok_closed or closed ~= true then
+			error("Mason canonical package already has an active install reservation")
+		end
+	end
+	local sentinel = {
+		is_closed = function()
+			return false
+		end,
+	}
+	canonical.install_handle = sentinel
+	if canonical.install_handle ~= sentinel then
+		error("Mason canonical package rejected install reservation")
+	end
+	return sentinel
+end
+
+local function swap_install_handle(canonical, sentinel, handle)
+	if not valid_handle(handle) then
 		error("Mason install returned an invalid handle")
+	end
+	if canonical.install_handle ~= sentinel then
+		error("Mason canonical install reservation changed during dispatch")
 	end
 	canonical.install_handle = handle
 	if canonical.install_handle ~= handle then
 		error("Mason canonical package rejected install reservation")
 	end
+	return handle
 end
 
 local function detached_package(item, live_package, package_module)
 	if type(package_module) ~= "table" or type(package_module.new) ~= "function" then
 		error("Mason detached package constructor unavailable")
 	end
-	-- The constructor receives a second copy so neither it nor later live-registry
-	-- mutation can alter the prepared decision snapshot retained by the ledger.
 	local detached = package_module:new(clone(item.spec_snapshot), live_package.registry)
 	if type(detached) ~= "table" or detached == live_package or detached.name ~= item.package then
 		error("detached Mason package identity mismatch")
@@ -463,6 +537,346 @@ local function detached_package(item, live_package, package_module)
 	return detached
 end
 
+local function plain(value, seen, omit_install)
+	local kind = type(value)
+	if kind == "nil" or kind == "boolean" or kind == "number" or kind == "string" then
+		return value
+	end
+	if kind ~= "table" then
+		error("unrepresentable value")
+	end
+	seen = seen or {}
+	if seen[value] then
+		error("cyclic value")
+	end
+	seen[value] = true
+	local copy = {}
+	for key, item in pairs(value) do
+		local key_kind = type(key)
+		if key_kind ~= "boolean" and key_kind ~= "number" and key_kind ~= "string" then
+			error("unrepresentable key")
+		end
+		if not (omit_install and key == "install") then
+			copy[key] = plain(item, seen, false)
+		end
+	end
+	seen[value] = nil
+	return copy
+end
+
+local function location_dir(location)
+	if type(location) ~= "table" and type(location) ~= "userdata" then
+		error("Mason install location unavailable")
+	end
+	local ok_getter, get_dir = pcall(function()
+		return location.get_dir
+	end)
+	local dir
+	if ok_getter and type(get_dir) == "function" then
+		dir = get_dir(location)
+	elseif type(location) == "table" and getmetatable(location) == nil then
+		for key in pairs(location) do
+			if key ~= "dir" then
+				error("Mason serialized install location shape unavailable")
+			end
+		end
+		dir = location.dir
+	else
+		error("Mason install location getter unavailable")
+	end
+	if type(dir) ~= "string" or dir == "" or #dir > 4096 or sanitize(dir, 4096) ~= dir then
+		error("Mason install location directory unavailable")
+	end
+	return dir
+end
+
+local function normalize_install_options(options)
+	if type(options) ~= "table" then
+		error("Mason install options unavailable")
+	end
+	return plain({
+		debug = options.debug,
+		force = options.force,
+		strict = options.strict,
+		target = options.target,
+		version = options.version,
+		location_dir = location_dir(options.location),
+	})
+end
+
+local function result_value(result)
+	if type(result) ~= "table" or type(result.is_success) ~= "function" or type(result.get_or_nil) ~= "function" then
+		error("Mason compiler Result contract unavailable")
+	end
+	if result:is_success() ~= true then
+		error("Mason compiler rejected package specification")
+	end
+	local value = result:get_or_nil()
+	if type(value) ~= "table" then
+		error("Mason compiler returned invalid parsed source")
+	end
+	return value
+end
+
+local ATTESTABLE_COMPILERS = {
+	cargo = true,
+	composer = true,
+	gem = true,
+	golang = true,
+	luarocks = true,
+	nuget = true,
+	opam = true,
+}
+
+local function compiler_state(parsed, runtime)
+	if type(parsed.purl) ~= "table" or type(parsed.purl.type) ~= "string" or type(parsed.source) ~= "table" then
+		error("Mason compiler parsed source unavailable")
+	end
+	local source_ok, source = pcall(plain, parsed.source)
+	local fingerprint_ok, fingerprint = pcall(runtime.source_fingerprint)
+	local identity_matches = fingerprint_ok
+		and type(fingerprint) == "string"
+		and fingerprint == runtime.expected_fingerprint
+	return {
+		fingerprint = fingerprint_ok and fingerprint or "unavailable",
+		identity_matches = identity_matches,
+		purl_type = parsed.purl.type,
+		provable = source_ok and identity_matches and ATTESTABLE_COMPILERS[parsed.purl.type] == true,
+		source = source_ok and source or {},
+	}
+end
+
+local function capture_contract(plan, item, runtime)
+	if type(runtime.package_module.DEFAULT_INSTALL_OPTS) ~= "table" then
+		error("Mason install defaults unavailable")
+	end
+	if type(runtime.compiler) ~= "table" or type(runtime.compiler.parse) ~= "function" then
+		error("Mason compiler parse unavailable")
+	end
+	if type(runtime.purl) ~= "table" or type(runtime.purl.compile) ~= "function" then
+		error("Mason Purl compiler unavailable")
+	end
+	local effective = vim.tbl_extend("force", runtime.package_module.DEFAULT_INSTALL_OPTS, { location = plan.location })
+	local parsed = result_value(runtime.compiler.parse(item.spec_snapshot, effective))
+	if type(parsed.purl) ~= "table" or type(parsed.raw_source) ~= "table" then
+		error("Mason compiler parsed source unavailable")
+	end
+	local state = compiler_state(parsed, runtime)
+	local source = {
+		type = item.spec_snapshot.schema,
+		id = runtime.purl.compile(parsed.purl),
+		raw = plain(parsed.raw_source, nil, parsed.purl.type == "mason"),
+	}
+	if type(source.type) ~= "string" or type(source.id) ~= "string" then
+		error("Mason compiler source contract unavailable")
+	end
+	return effective, plain(source), normalize_install_options(effective), state
+end
+
+local function receipt_value(receipt, method)
+	if type(receipt) ~= "table" or type(receipt[method]) ~= "function" then
+		error("Mason receipt getter unavailable")
+	end
+	return receipt[method](receipt)
+end
+
+local function normalize_receipt(receipt)
+	return plain({
+		name = receipt_value(receipt, "get_name"),
+		schema_version = receipt_value(receipt, "get_schema_version"),
+		source = receipt_value(receipt, "get_source"),
+		registry = receipt_value(receipt, "get_registry"),
+		install_options = normalize_install_options(receipt_value(receipt, "get_install_options")),
+		links = receipt_value(receipt, "get_links"),
+	})
+end
+
+local RECEIPT_GETTERS = {
+	"get_name",
+	"get_schema_version",
+	"get_source",
+	"get_registry",
+	"get_install_options",
+	"get_links",
+}
+
+local function preflight_receipt(runtime, package, location)
+	local receipt = runtime.receipt_module and runtime.receipt_module.InstallReceipt
+	if type(receipt) ~= "table" or type(receipt.from_json) ~= "function" then
+		error("Mason receipt class unavailable")
+	end
+	for _, method in ipairs(RECEIPT_GETTERS) do
+		if type(receipt[method]) ~= "function" then
+			error("Mason receipt getter unavailable")
+		end
+	end
+	if type(package.get_receipt) ~= "function" then
+		error("Mason receipt reader unavailable")
+	end
+	local optional = package:get_receipt(location)
+	if type(optional) ~= "table" or type(optional.or_else) ~= "function" then
+		error("Mason receipt Optional contract unavailable")
+	end
+	local existing = optional:or_else(nil)
+	if existing ~= nil then
+		normalize_receipt(existing)
+	end
+end
+
+local function disk_receipt(package, location)
+	if type(package.get_receipt) ~= "function" then
+		error("Mason receipt reader unavailable")
+	end
+	local optional = package:get_receipt(location)
+	if type(optional) ~= "table" or type(optional.or_else) ~= "function" then
+		error("Mason receipt Optional contract unavailable")
+	end
+	local receipt = optional:or_else(nil)
+	if receipt == nil then
+		error("Mason disk receipt unavailable")
+	end
+	return receipt
+end
+
+local function normalize_path(path)
+	if type(path) ~= "string" or path == "" or path:find("[%z\1-\31\127]") then
+		error("invalid path")
+	end
+	local ok, normalized = pcall(vim.fs.normalize, path)
+	if not ok or type(normalized) ~= "string" or normalized == "" then
+		error("invalid path")
+	end
+	return normalized:gsub("/+$", "")
+end
+
+local function under(path, root)
+	return path == root or path:sub(1, #root + 1) == root .. "/"
+end
+
+local function safe_relative(path)
+	if type(path) ~= "string" or path == "" or path:find("[%z\1-\31\127]") then
+		return false
+	end
+	if path:match("^[/\\]") or path:match("^[A-Za-z]:") then
+		return false
+	end
+	for segment in path:gmatch("[^/\\]+") do
+		if segment == ".." then
+			return false
+		end
+	end
+	return true
+end
+
+local function canonical(runtime, path)
+	local value = runtime.realpath(path)
+	if type(value) ~= "string" or value == "" then
+		error("Mason path canonicalization failed")
+	end
+	return normalize_path(value)
+end
+
+local function handle_closed(handle)
+	local ok, closed = pcall(handle.is_closed, handle)
+	if not ok or closed ~= true then
+		error("Mason install handle remains open after success callback")
+	end
+end
+
+local function compiler_provenance_matches(item, runtime)
+	local captured = item._compiler_state
+	if type(captured) ~= "table" or captured.provable ~= true then
+		return false
+	end
+	local parsed = result_value(runtime.compiler.parse(item.spec_snapshot, item._effective_install_options))
+	local current = compiler_state(parsed, runtime)
+	return current.provable == true and equal(current, captured)
+end
+
+local function verify_receipt(plan, item, runtime, handle, callback_receipt)
+	local live_package = revalidate(plan, item, runtime.registry, runtime.opts, true)
+	handle_closed(handle)
+	local disk = normalize_receipt(disk_receipt(live_package, plan.location))
+	if not equal(callback_receipt, disk) then
+		error("Mason callback and disk receipts differ")
+	end
+	if callback_receipt.schema_version ~= "2.0" or callback_receipt.name ~= item.package then
+		error("Mason receipt schema or package identity mismatch")
+	end
+	if not equal(callback_receipt.registry, item.registry_identity.serialized) then
+		error("Mason receipt registry provenance mismatch")
+	end
+	if not equal(callback_receipt.source, item._expected_source) then
+		error("Mason receipt source provenance mismatch")
+	end
+	if not equal(callback_receipt.install_options, item._install_options) then
+		error("Mason receipt install options mismatch")
+	end
+	if type(callback_receipt.links) ~= "table" or type(callback_receipt.links.bin) ~= "table" then
+		error("Mason receipt bin links unavailable")
+	end
+
+	local root = canonical(runtime, plan.install_root)
+	local package_path = canonical(runtime, item.install_path)
+	if package_path == root or not under(package_path, root) then
+		error("Mason package escaped install root")
+	end
+	local targets = {}
+	for _, binary in ipairs(item.binaries) do
+		local linked_name = runtime.is_windows and (binary .. ".cmd") or binary
+		local relative = callback_receipt.links.bin[linked_name]
+		if not safe_relative(relative) then
+			error("Mason receipt contains unsafe bin link")
+		end
+		local target = canonical(runtime, normalize_path(item.install_path .. "/" .. relative))
+		if target == package_path or not under(target, package_path) then
+			error("Mason receipt target escaped package directory")
+		end
+		targets[binary] = target
+	end
+
+	if runtime.is_windows then
+		return nil, "Windows wrapper verification is not supported yet"
+	end
+
+	local paths = {}
+	for _, binary in ipairs(item.binaries) do
+		local probe = runtime.probe(binary)
+		local expected_link = normalize_path(plan.install_root .. "/bin/" .. binary)
+		if
+			type(probe) ~= "table"
+			or probe.status ~= "found"
+			or probe.source ~= "mason"
+			or type(probe.path) ~= "string"
+			or type(probe.realpath) ~= "string"
+			or normalize_path(probe.path) ~= expected_link
+			or canonical(runtime, probe.realpath) ~= targets[binary]
+		then
+			error("Mason binary link or target verification failed")
+		end
+		paths[#paths + 1] = expected_link
+	end
+	if not compiler_provenance_matches(item, runtime) then
+		return nil, "compiler-derived install inputs are not receipt-verifiable"
+	end
+	return paths
+end
+
+local function blocked(item)
+	return item.deadline_reached == true or item._effects_disabled == true
+end
+
+local function mark_unverified(runtime, item, reason, notify_allowed)
+	if blocked(item) and item.outcome ~= "verifying" then
+		return
+	end
+	item.outcome = "installed_unverified"
+	item.error = sanitize(reason, 200)
+	if notify_allowed ~= false then
+		unverified_effect(runtime, item, reason)()
+	end
+end
+
 ---@param plan muster.MasonPlan
 ---@param opts? table
 function M.execute(plan, opts)
@@ -472,58 +886,147 @@ function M.execute(plan, opts)
 	end
 	local ok_runtime, runtime = pcall(defaults, opts)
 	if not ok_runtime or type(runtime.registry) ~= "table" then
+		local fallback = notification_runtime(opts)
+		for _, item in ipairs(plan.items) do
+			if item.outcome == "planned" then
+				fail_item(fallback, item, "Mason install contract validation failed")
+			end
+		end
 		return
 	end
+	runtime.opts = opts
 	for _, item in ipairs(plan.items) do
 		if item.outcome == "planned" then
-			local ok_package, live_or_error, detached = pcall(function()
-				local live_package = revalidate(plan, item, runtime.registry, opts)
-				return live_package, detached_package(item, live_package, runtime.package_module)
+			item.deadline_reached = false
+			item._effects_disabled = false
+			local ok_package, live_or_error, detached, install_opts, sentinel = pcall(function()
+				local live_package = revalidate(plan, item, runtime.registry, opts, false)
+				preflight_receipt(runtime, live_package, plan.location)
+				local package = detached_package(item, live_package, runtime.package_module)
+				local effective, expected_source, normalized_opts, captured_compiler =
+					capture_contract(plan, item, runtime)
+				item._expected_source = expected_source
+				item._install_options = normalized_opts
+				item._effective_install_options = effective
+				item._compiler_state = captured_compiler
+				local reservation = reserve_canonical(live_package)
+				return live_package, package, effective, reservation
 			end)
 			if not ok_package then
-				fail_item(runtime, item, live_or_error)
+				fail_item(runtime, item, "Mason install contract validation failed")
 			else
-				local canonical = live_or_error
+				local canonical_package = live_or_error
 				local package = detached
 				local callback_seen = false
-				local callback_disabled = false
 				local invoking = true
-				local buffered_effect
+				local callback_receipt
+				local callback_error
+				local callback_success
+				local handle
+
+				local function verification_effect()
+					if blocked(item) or item.outcome ~= "verifying" then
+						return
+					end
+					local verifier = runtime.verify or verify_receipt
+					local ok_verify, paths, unverified_reason =
+						pcall(verifier, plan, item, runtime, handle, callback_receipt)
+					if blocked(item) or item.outcome ~= "verifying" then
+						return
+					end
+					if not ok_verify then
+						mark_unverified(runtime, item, "post-install receipt or path verification failed")
+					elseif unverified_reason then
+						mark_unverified(runtime, item, unverified_reason)
+					else
+						item.outcome = "completed"
+						item.error = nil
+						success_effect(runtime, item, paths)()
+					end
+				end
+
+				local function settle_callback()
+					if blocked(item) then
+						return
+					end
+					if callback_success then
+						local accepted = bridge(runtime, verification_effect)
+						if not accepted and not blocked(item) and item.outcome == "verifying" then
+							mark_unverified(runtime, item, "post-install safe-context bridge failed", false)
+						end
+					else
+						bridge(runtime, failure_effect(runtime, item, callback_error))
+					end
+				end
+
 				local function callback(ok, value)
-					if callback_seen or callback_disabled then
+					if callback_seen or blocked(item) then
 						return
 					end
 					callback_seen = true
-					if ok then
-						item.outcome = "completed"
+					callback_success = ok == true
+					if callback_success then
+						local ok_receipt, normalized = pcall(normalize_receipt, value)
+						if ok_receipt then
+							callback_receipt = normalized
+						else
+							callback_receipt = nil
+						end
+						item.outcome = "verifying"
 						item.error = nil
-						buffered_effect = success_effect(runtime, item)
 					else
+						callback_error = sanitize(value, 200)
 						item.outcome = "failed"
-						item.error = sanitize(value, 200)
-						buffered_effect = failure_effect(runtime, item, value)
+						item.error = "Mason installer callback reported failure"
 					end
 					if not invoking then
-						bridge(runtime, buffered_effect)
+						settle_callback()
 					end
 				end
+
 				item.outcome = "dispatched"
-				local ok_install, handle_or_error =
-					pcall(package.install, package, { location = plan.location }, callback)
+				notify_start(runtime, item)
+				local ok_install, handle_or_error = pcall(package.install, package, install_opts, callback)
 				if ok_install then
-					ok_install, handle_or_error = pcall(reserve_install_handle, canonical, handle_or_error)
+					ok_install, handle_or_error =
+						pcall(swap_install_handle, canonical_package, sentinel, handle_or_error)
 				end
 				invoking = false
 				if not ok_install then
-					callback_disabled = true
+					item._effects_disabled = true
 					item.outcome = "unknown"
-					item.error = sanitize(handle_or_error, 200)
-					buffered_effect = nil
+					item.error = "Mason install dispatch outcome is ambiguous"
 					bridge(runtime, unknown_effect(runtime, item))
-				elseif buffered_effect then
-					bridge(runtime, buffered_effect)
+				else
+					handle = handle_or_error
+					if callback_seen then
+						settle_callback()
+					end
 				end
 			end
+		end
+	end
+end
+
+---@param plan muster.MasonPlan
+---@param opts? table
+function M.expire(plan, opts)
+	opts = opts or {}
+	if type(plan) ~= "table" or type(plan.items) ~= "table" then
+		return
+	end
+	local runtime = notification_runtime(opts)
+	for _, item in ipairs(plan.items) do
+		if item.outcome == "dispatched" then
+			item.deadline_reached = true
+			item.outcome = "unknown"
+			item.error = "Mason install did not complete before the observation deadline"
+			bridge(runtime, unknown_effect(runtime, item))
+		elseif item.outcome == "verifying" then
+			item.deadline_reached = true
+			item.outcome = "installed_unverified"
+			item.error = "post-install verification did not complete before the observation deadline"
+			bridge(runtime, unverified_effect(runtime, item, item.error))
 		end
 	end
 end

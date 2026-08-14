@@ -3,19 +3,28 @@
 
 local M = {}
 
-local current = { state = "idle" }
+local sanitize = require("muster.text").sanitize
 
-local function sanitize(value, limit)
-	local ok, text = pcall(tostring, value or "unknown")
-	if not ok then
-		text = "unknown"
+local current = { state = "idle" }
+local live_plan
+local live_handoff
+local deadline_timer
+
+local function close_deadline_timer()
+	if deadline_timer then
+		pcall(deadline_timer.stop, deadline_timer)
+		pcall(deadline_timer.close, deadline_timer)
+		deadline_timer = nil
 	end
-	text = text:gsub("[%z\1-\31\127]", "?")
-	limit = limit or 200
-	if #text > limit then
-		text = text:sub(1, limit - 3) .. "..."
+end
+
+local function retire_live_plan()
+	if type(live_plan) == "table" and type(live_handoff) == "table" and type(live_handoff.expire) == "function" then
+		pcall(live_handoff.expire, live_plan)
 	end
-	return text
+	close_deadline_timer()
+	live_plan = nil
+	live_handoff = nil
 end
 
 local function append_note(result, message)
@@ -94,6 +103,7 @@ end
 function M.run(callback, opts)
 	local config
 	opts, config = production_opts(opts)
+	retire_live_plan()
 	current = { state = "running" }
 	local completed = false
 
@@ -129,7 +139,38 @@ function M.run(callback, opts)
 				local handoff = dependency(opts, "handoff", function()
 					return require("muster.handoff.mason")
 				end)
+				live_plan = plan
+				live_handoff = handoff
 				handoff.execute(plan)
+				if #plan.items > 0 then
+					local deadline_factory = dependency(opts, "deadline_timer_factory", function()
+						return vim.uv.new_timer
+					end)
+					local deadline_fired = false
+					local function expire_plan()
+						if deadline_fired then
+							return
+						end
+						deadline_fired = true
+						if live_plan == plan and type(handoff.expire) == "function" then
+							handoff.expire(plan)
+						end
+					end
+					local ok_timer, timer = pcall(deadline_factory)
+					if ok_timer and timer then
+						deadline_timer = timer
+						local ok_start = pcall(timer.start, timer, 30000, 0, function()
+							expire_plan()
+							close_deadline_timer()
+						end)
+						if not ok_start then
+							close_deadline_timer()
+							expire_plan()
+						end
+					else
+						expire_plan()
+					end
+				end
 			end)
 			if not ok_execute then
 				notify_failure(opts, execute_err)
@@ -343,13 +384,29 @@ function M.run(callback, opts)
 	end
 end
 
----@return { state: "idle"|"running"|"reported"|"failed"|"bridge_failed", reason?: string }
+---@return { state: "idle"|"running"|"reported"|"failed"|"bridge_failed", reason?: string, mason?: table }
 function M.status()
-	return vim.deepcopy(current)
+	local status = vim.deepcopy(current)
+	if type(live_plan) == "table" and type(live_plan.items) == "table" and #live_plan.items > 0 then
+		local items = {}
+		for _, item in ipairs(live_plan.items) do
+			local summary = {
+				package = sanitize(item.package, 120),
+				outcome = sanitize(item.outcome, 40),
+			}
+			if item.error ~= nil then
+				summary.reason = sanitize(item.error, 200)
+			end
+			items[#items + 1] = summary
+		end
+		status.mason = { items = items }
+	end
+	return status
 end
 
 ---Test seam.
 function M.reset()
+	retire_live_plan()
 	current = { state = "idle" }
 end
 

@@ -65,8 +65,14 @@
 ---@field entries muster.Entry[]
 ---@field lsp_names string[]
 ---@field install_path string
----@field outcome "planned"|"dispatched"|"completed"|"failed"|"unknown"
+---@field outcome "planned"|"dispatched"|"verifying"|"completed"|"installed_unverified"|"failed"|"unknown"
 ---@field error? string
+---@field deadline_reached? boolean
+---@field _effects_disabled? boolean
+---@field _expected_source? table
+---@field _install_options? table
+---@field _effective_install_options? table
+---@field _compiler_state? { fingerprint: string, identity_matches: boolean, purl_type: string, provable: boolean, source: table }
 
 ---@class muster.MasonPlan
 ---@field enabled boolean
