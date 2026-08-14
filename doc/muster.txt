@@ -24,7 +24,8 @@ supply missing ones.
 
 muster requires Neovim 0.12 or newer. It is read-only by default: inspection
 never installs, removes, or reconfigures anything. The only provisioning path
-is an explicit `install = "mason"` opt-in on the automatic startup run.
+is an explicit `mason_install_fallback = true` opt-in on the automatic startup
+run.
 
 
 INSTALLATION                                 *muster-muster.nvim-installation*
@@ -49,11 +50,15 @@ runs; a bare repository dependency may not make that adapter available.
         "mfussenegger/nvim-dap",
       },
       opts = {
-        lsp = { "lua_ls", "gopls" },
+        lsp = {
+          "lua_ls",
+          { name = "jsonls", command = "vscode-json-language-server" },
+          { name = "yamlls", command = "yaml-language-server" },
+        },
         conform = { "stylua" },
         lint = { "selene" },
         dap = { "codelldb" },
-        install = false,
+        mason_install_fallback = false,
         notify_on_startup = true,
       },
     }
@@ -86,11 +91,15 @@ have their own `opts` or `config` that finishes host setup before muster runs.
         "mfussenegger/nvim-dap",
       },
       opts = {
-        lsp = { "lua_ls", "gopls" },
+        lsp = {
+          "lua_ls",
+          { name = "jsonls", command = "vscode-json-language-server" },
+          { name = "yamlls", command = "yaml-language-server" },
+        },
         conform = { "stylua" },
         lint = { "selene" },
         dap = { "codelldb" },
-        install = "mason",
+        mason_install_fallback = true,
         notify_on_startup = true,
       },
     }
@@ -122,15 +131,19 @@ dependencies:
       config = function()
         local null_ls = require("null-ls")
         require("muster").setup({
-          lsp = { "lua_ls", "gopls" },
+          lsp = {
+            "lua_ls",
+            { name = "jsonls", command = "vscode-json-language-server" },
+            { name = "yamlls", command = "yaml-language-server" },
+          },
           conform = { "stylua", "prettierd" },
           lint = { "selene" },
           dap = { "codelldb" },
           none_ls = {
             null_ls.builtins.formatting.stylua,
           },
-          install = false,          -- false (default) or "mason"
-          notify_on_startup = true, -- default; silent when nothing needs attention
+          mason_install_fallback = false, -- default; true permits Mason installs
+          notify_on_startup = true,       -- default; silent when nothing needs attention
         })
       end,
     }
@@ -140,6 +153,34 @@ Use the names and entries accepted by each host plugin. If the `none_ls` key is
 omitted, muster reads the registered none-ls sources after `null-ls.setup()`.
 All other lists are explicit; muster does not infer them from filetype
 mappings.
+
+LSP entries accept either a server name or an exact `{ name = "server", command
+= "executable" }` map. A string declaration looks up `vim.lsp.config[name]` and
+probes its static command. If that catalog command is a function, muster does
+not invoke it and the entry is `unverifiable`. A table declaration keeps `name`
+as the server identity but makes its explicit `command` authoritative for PATH
+probing, provider advice, and Mason package mapping:
+
+>lua
+    lsp = {
+      "lua_ls",
+      { name = "jsonls", command = "vscode-json-language-server" },
+      { name = "yamlls", command = "yaml-language-server" },
+    }
+<
+
+The explicit command must be a bare executable name, not a path, argument list,
+or shell command. A readable `vim.lsp.config[name]` catalog entry is still
+mandatory: the declaration supplies a probe prerequisite, not a new LSP server
+configuration. In particular, function-form catalog commands such as `jsonls`
+and `yamlls` may later select a project-local executable or another
+root-specific transport. Finding the declared global command does not prove
+which transport the LSP function will launch. muster never invokes the
+function, changes the catalog entry, or enables the server.
+
+The removed `install` option is always rejected, including `install = false`.
+Use `mason_install_fallback = false` for read-only operation or `true` for the
+single installation-capable automatic path.
 
 Third-party integrations use the same adapter interface and setup key. Register
 them inside the lazy config callback before calling setup:
@@ -188,10 +229,11 @@ COMMANDS AND STARTUP NOTIFICATION ~
 - `:checkhealth muster` synchronously checks configuration and declared tools.
 - With the lazy.nvim examples above, the automatic check runs once after the
     first real buffer opens and a UI attaches. `VimEnter` provides the fallback
-    for headless sessions. It can notify about missing, unknown, broken, or
-    unverifiable tools and skipped host plugins. It omits found tools and is
+    for headless sessions. Its summary can notify about missing, unknown, broken,
+    or unverifiable tools and skipped host plugins. It omits found tools and is
     silent when nothing needs attention. Set `notify_on_startup = false` to
-    disable only this notification.
+    disable only this summary. Mason install lifecycle INFO/ERROR notifications
+    remain enabled when installation authority is opted in.
 
 Both commands are inspection surfaces: they do not run provider enrichment,
 refresh Mason, or install anything.
@@ -266,27 +308,44 @@ because formatter commands and other predicates can depend on the buffer.
 
 INSTALLATION AUTHORITY             *muster-muster.nvim-installation-authority*
 
-  Surface                    Probe            Advice      Install
-  -------------------------- ---------------- ----------- ---------
-  :Muster                    Current buffer   None        No
-  :checkhealth muster        Current buffer   None        No
-  probe()                    Synchronous      None        No
-  check()                    Asynchronous     Read-only   No
-  Auto (install = false)     Yes              Read-only   No
-  Auto (install = "mason")   Yes              Yes         Yes
-Only the automatic run with `install = "mason"` has provisioning authority. It
-requires Mason to be loaded, `mason.setup()` to have run, and the Mason
-registry to refresh successfully. muster does not force-load Mason. A missing
-prerequisite or refresh failure degrades to reporting without installation.
+  Surface                 Probe            Advice      Install
+  ----------------------- ---------------- ----------- ---------
+  :Muster                 Current buffer   None        No
+  :checkhealth muster     Current buffer   None        No
+  probe()                 Synchronous      None        No
+  check()                 Asynchronous     Read-only   No
+  Auto (fallback false)   Yes              Read-only   No
+  Auto (fallback true)    Yes              Yes         Yes
+Only the automatic run with `mason_install_fallback = true` has provisioning
+authority. It requires Mason to be loaded, `mason.setup()` to have run, and the
+Mason registry to refresh successfully. muster does not force-load Mason. A
+missing prerequisite or refresh failure degrades to reporting without
+installation.
 
 The opted-in order is probe, registry refresh, enrichment, hand-off
-preparation, reporting, then install dispatch. The reporting step completes
-before any install is dispatched. Deliberately suppressing the startup
-notification does not suppress installation when `install = "mason"` was
-explicitly opted in. Each package is handled best-effort: platform support,
-registry state, or installation can still fail, and one failure does not turn
-the reporting step into a success claim. muster never automatically uninstalls
-or cleans up packages.
+preparation, reporting, then install dispatch. Reporting completes before any
+install is dispatched. muster uses Mason’s generic package installer; it does
+not call a mason-lspconfig install shortcut, run `:MasonInstall`, or directly
+enable an LSP server. LSP activation remains the user’s or
+mason-lspconfig’s policy.
+
+Each dispatched package produces an INFO start notification. A verified Unix
+success produces an INFO success notification. Installer failure, an unknown
+dispatch or deadline outcome, and a successful install that cannot be verified
+produce distinct ERROR notifications. These lifecycle notifications and
+installation authority are independent of `notify_on_startup`; disabling the
+startup summary suppresses neither.
+
+A `completed` outcome means the callback and persisted receipt, captured
+registry/compiler inputs, and every expected Unix Mason bin link and receipt
+target were verified. `failed` means either a pre-dispatch contract,
+revalidation, detached-package, or reservation check failed, or the installer
+callback reported failure. `unknown` means dispatch, handle, or deadline
+outcome could not be established. `installed_unverified` means Mason reported
+success but receipt, source, path, or safe-context verification did not
+complete or pass. The package may still be installed. muster retains such
+packages and never automatically rolls back, uninstalls, or cleans them up. One
+package’s failure does not change another package’s outcome.
 
 
 KNOWN LIMITS                                 *muster-muster.nvim-known-limits*
@@ -295,13 +354,18 @@ KNOWN LIMITS                                 *muster-muster.nvim-known-limits*
     to load the host specs first, but those specs must still run their own setup
     and require their main modules. Conform, lint, DAP, and none-ls are skipped as
     "host plugin not loaded" until that happens. LSP is the exception: its adapter
-    uses Neovim’s built-in `vim.lsp.config`, so an unresolved server is `unknown`
-    rather than a skipped host.
+    uses Neovim’s built-in `vim.lsp.config`, so an absent catalog server is
+    `unknown` rather than a skipped host, even when an explicit command was given.
 - DAP has no external name catalog. Mason hand-off works only when an adapter’s
     command is the actual tool binary; wrappers such as a Python interpreter may
     not map to a useful package.
-- Function-form commands can depend on a real buffer. When muster cannot resolve
-    one safely, it reports `unverifiable`, not `missing`.
+- LSP string declarations cannot safely inspect function-form catalog commands
+    and report `unverifiable`. An explicit `{ name, command }` declaration can
+    verify a bare executable prerequisite without invoking the function, but it
+    cannot prove the root-specific transport the function later launches.
+- Windows Mason callback success is always `installed_unverified`; exact `.cmd`
+    wrapper, PATHEXT, separator, case, and drive verification is not supported yet.
+    The successfully installed package is retained and no LSP is enabled.
 - Overlay version probing is best effort. Its generic fallback tries
     `--version`, `version`, and `-version` only when `:Muster` is opened. It can
     miss date-only versions, and a tool’s version command can have side effects.
