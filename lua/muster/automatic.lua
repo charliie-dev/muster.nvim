@@ -85,7 +85,7 @@ end
 
 local function production_opts(opts)
 	opts = opts or {}
-	local config = opts.config or require("muster.config").get() or { install = false }
+	local config = opts.config or require("muster.config").get() or { mason_install_fallback = false }
 	return opts, config
 end
 
@@ -138,7 +138,7 @@ function M.run(callback, opts)
 		reported(result, reported_reason)
 	end
 
-	if config.install ~= "mason" then
+	if config.mason_install_fallback ~= true then
 		local check = dependency(opts, "check", function()
 			return require("muster").check
 		end)

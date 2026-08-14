@@ -178,6 +178,14 @@ describe("report.emit", function()
 		assert.is_false(emitted)
 	end)
 
+	it("keeps Mason fallback authority independent from summary notification", function()
+		config.setup({ mason_install_fallback = true, notify_on_startup = false })
+		local emitted = notified(result({
+			entries = { entry("a", "x", { status = "missing", binary = "x" }) },
+		}))
+		assert.is_false(emitted)
+	end)
+
 	it("escalates to ERROR when any skip is an error", function()
 		-- A crashed adapter and a not-yet-loaded plugin must not read alike.
 		local _, seen = notified(result({

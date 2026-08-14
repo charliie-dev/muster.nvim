@@ -99,9 +99,9 @@ function M.check()
 		vim.health.error(("setup key %q matches no registered adapter"):format(key))
 	end
 
-	if config.install == "mason" then
+	if config.mason_install_fallback == true then
 		vim.health.info(
-			'install = "mason" is enabled: only the automatic startup run may refresh or install; '
+			"mason_install_fallback = true: only the automatic startup run may refresh or install; "
 				.. "this health check is read-only"
 		)
 	end

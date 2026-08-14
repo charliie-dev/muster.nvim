@@ -20,7 +20,7 @@ local function harness(overrides)
 		self.closes = self.closes + 1
 	end
 	local opts = {
-		config = { install = "mason" },
+		config = { mason_install_fallback = true },
 		mason = { has_setup = true },
 		registry = {
 			refresh = function(callback)
@@ -85,7 +85,7 @@ end
 describe("automatic Mason pipeline", function()
 	it("uses the existing E1 check path when installation is disabled", function()
 		local callback
-		local automatic, opts, events = harness({ config = { install = false } })
+		local automatic, opts, events = harness({ config = { mason_install_fallback = false } })
 		opts.check = function(_, done)
 			events[#events + 1] = "check"
 			callback = done
@@ -172,7 +172,7 @@ describe("automatic Mason pipeline", function()
 			{
 				name = "check",
 				configure = function(opts)
-					opts.config = { install = false }
+					opts.config = { mason_install_fallback = false }
 					opts.check = function()
 						error("check exploded\nwith detail")
 					end
@@ -219,7 +219,7 @@ describe("automatic Mason pipeline", function()
 	end)
 
 	it("fails exactly once when check calls back and then raises", function()
-		local automatic, opts, events = harness({ config = { install = false } })
+		local automatic, opts, events = harness({ config = { mason_install_fallback = false } })
 		opts.check = function(_, callback)
 			callback(result())
 			error("late check throw")

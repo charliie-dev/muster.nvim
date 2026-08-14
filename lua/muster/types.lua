@@ -23,6 +23,11 @@
 ---@field source? muster.Source Required when status == "found".
 ---@field reason? string    Required for "unverifiable", "unknown" and "broken".
 
+---@class muster.LspDeclaration
+---@field name string
+---@field command string
+---@alias muster.LspEntry string|muster.LspDeclaration
+
 ---One subsystem, adapted to a single interface.
 ---@class muster.Adapter
 ---@field id string

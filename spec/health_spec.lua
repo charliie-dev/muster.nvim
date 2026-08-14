@@ -61,17 +61,18 @@ describe("health.check", function()
 		assert.is_truthy(has(calls, "info", "setup() has not been called"))
 	end)
 
-	it("reports a rejected setup as an error, not as never-called", function()
-		config.setup({ conform = "not a list" })
+	it("reports the rejected install tombstone as an error, not as never-called", function()
+		config.setup({ install = "mason" })
 		local calls = render(function()
 			require("muster.health").check()
 		end)
 		assert.is_truthy(has(calls, "error", "rejected"))
+		assert.is_truthy(has(calls, "error", "mason_install_fallback"))
 		assert.is_falsy(has(calls, "info", "setup() has not been called"))
 	end)
 
 	it("documents automatic-only Mason authority and renders a terminal bridge failure", function()
-		config.setup({ install = "mason" })
+		config.setup({ mason_install_fallback = true })
 		local saved = package.loaded["muster.automatic"]
 		package.loaded["muster.automatic"] = {
 			status = function()
@@ -105,7 +106,7 @@ describe("health.check", function()
 	end)
 
 	it("does not load the automatic module during a read-only health check", function()
-		config.setup({ install = "mason" })
+		config.setup({ mason_install_fallback = true })
 		local saved = package.loaded["muster.automatic"]
 		package.loaded["muster.automatic"] = nil
 		render(function()

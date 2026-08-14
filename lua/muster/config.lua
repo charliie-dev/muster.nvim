@@ -8,14 +8,15 @@
 local M = {}
 
 ---Reserved keys that are options rather than adapter tool lists.
-M.OPTIONS = { install = true, notify_on_startup = true }
+---`install` remains reserved so the removed option cannot become an adapter id.
+M.OPTIONS = { install = true, mason_install_fallback = true, notify_on_startup = true }
 
 ---@class muster.Config
----@field install false|'"mason"'
+---@field mason_install_fallback boolean
 ---@field notify_on_startup boolean
 ---@field [string] any[]  Tool lists, keyed by adapter id.
 local defaults = {
-	install = false,
+	mason_install_fallback = false,
 	notify_on_startup = true,
 }
 
@@ -29,12 +30,73 @@ local current = nil
 ---@type string|nil
 local setup_error = nil
 
+local function valid_lsp_name(value)
+	return type(value) == "string"
+		and #value <= 128
+		and value ~= "*"
+		and value:match("^[A-Za-z0-9][A-Za-z0-9_.-]*$") ~= nil
+end
+
+local function valid_lsp_command(value)
+	return type(value) == "string" and #value <= 255 and value:match("^[A-Za-z0-9][A-Za-z0-9_.+-]*$") ~= nil
+end
+
+local function validate_lsp(entries)
+	local declarations = {}
+	for index, entry in ipairs(entries) do
+		local name
+		local command
+		local kind = type(entry)
+		if kind == "string" then
+			name = entry
+			if not valid_lsp_name(name) then
+				error(("lsp[%d]: expected a valid LSP server name"):format(index), 0)
+			end
+		elseif kind == "table" then
+			if getmetatable(entry) ~= nil then
+				error(("lsp[%d]: expected a plain { name, command } map without a metatable"):format(index), 0)
+			end
+			for key in pairs(entry) do
+				if key ~= "name" and key ~= "command" then
+					error(
+						("lsp[%d]: unexpected key %s; expected exactly name and command"):format(
+							index,
+							vim.inspect(key)
+						),
+						0
+					)
+				end
+			end
+			if entry.name == nil or entry.command == nil then
+				error(("lsp[%d]: expected exactly { name, command }"):format(index), 0)
+			end
+			name = entry.name
+			command = entry.command
+			if not valid_lsp_name(name) then
+				error(("lsp[%d].name: expected a valid LSP server name"):format(index), 0)
+			end
+			if not valid_lsp_command(command) then
+				error(("lsp[%d].command: expected a bare executable name"):format(index), 0)
+			end
+		else
+			error(("lsp[%d]: expected a server name or { name, command } map"):format(index), 0)
+		end
+
+		local previous = declarations[name]
+		if previous and (previous.kind ~= kind or previous.command ~= command) then
+			error(("lsp: conflicting declarations for %q"):format(name), 0)
+		end
+		declarations[name] = { kind = kind, command = command }
+	end
+end
+
 ---@param opts table
 local function validate(opts)
 	vim.validate("opts", opts, "table")
-	vim.validate("install", opts.install, function(v)
-		return v == nil or v == false or v == "mason"
-	end, true, "false or 'mason'")
+	if rawget(opts, "install") ~= nil then
+		error("muster: `install` was removed; use `mason_install_fallback = true` to permit Mason installs", 0)
+	end
+	vim.validate("mason_install_fallback", opts.mason_install_fallback, "boolean", true)
 	vim.validate("notify_on_startup", opts.notify_on_startup, "boolean", true)
 	for key, value in pairs(opts) do
 		if not M.OPTIONS[key] then
@@ -44,6 +106,9 @@ local function validate(opts)
 			vim.validate(key, value, function(v)
 				return v == nil or vim.islist(v)
 			end, true, "a list of tool entries (got a map?)")
+			if key == "lsp" and value ~= nil then
+				validate_lsp(value)
+			end
 		end
 	end
 end

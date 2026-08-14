@@ -22,10 +22,13 @@ function M.available()
 	return false, "vim.lsp.config is unavailable in this Neovim build"
 end
 
----@param entry any
+---@param entry muster.LspEntry
 ---@return string
 function M.identity(entry)
-	return tostring(entry)
+	if type(entry) == "table" then
+		return entry.name
+	end
+	return entry --[[@as string]]
 end
 
 ---A table `cmd` is argv; its first element is the binary. A function `cmd`
@@ -62,6 +65,10 @@ function M.probe(entry, _bufnr)
 	end
 	if not config then
 		return probe.unknown("no lsp/ config and no registration for this name")
+	end
+
+	if type(entry) == "table" then
+		return probe.resolve(entry.command)
 	end
 
 	local binary, reason = binary_of(config.cmd)
