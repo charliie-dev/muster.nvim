@@ -363,6 +363,16 @@ KNOWN LIMITS                                 *muster-muster.nvim-known-limits*
     and report `unverifiable`. An explicit `{ name, command }` declaration can
     verify a bare executable prerequisite without invoking the function, but it
     cannot prove the root-specific transport the function later launches.
+- Verified Mason compiler completion is limited to this exact allowlist: cargo,
+    composer, gem, golang, luarocks, nuget, and opam. The `npm`, `pypi`, `github`,
+    `mason`, `generic`, `openvsx`, and `unknown` compiler types always remain
+    `installed_unverified` after a successful install. The jsonls and yamlls
+    declarations above are npm-backed examples, so their successful Mason
+    installs do not reach Muster’s `completed` outcome.
+- Mason’s runtime fingerprint detects on-disk Mason Lua source drift from the
+    pinned implementation. This is a trusted-process check: the running Neovim
+    process and in-memory Lua functions are trusted. It does not claim to defend
+    against same-process code monkeypatching functions during installation.
 - Windows Mason callback success is always `installed_unverified`; exact `.cmd`
     wrapper, PATHEXT, separator, case, and drive verification is not supported yet.
     The successfully installed package is retained and no LSP is enabled.
