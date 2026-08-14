@@ -499,6 +499,32 @@ describe("automatic Mason pipeline", function()
 		assert.equals("unknown", automatic.status().mason.items[1].outcome)
 	end)
 
+	it("projects malformed Mason outcomes as fixed unknown DTOs", function()
+		local plan = {
+			enabled = true,
+			items = { { package = "tool", outcome = "corrupt", error = "raw detail" } },
+		}
+		local automatic, opts = harness()
+		opts.handoff.prepare = function()
+			return plan
+		end
+		opts.handoff.execute = function() end
+		automatic.run(nil, opts)
+		assert.same({
+			package = "tool",
+			outcome = "unknown",
+			reason = "invalid Mason install outcome",
+		}, automatic.status().mason.items[1])
+
+		plan.items[1].outcome = {}
+		plan.items[1].error = "different raw detail"
+		assert.same({
+			package = "tool",
+			outcome = "unknown",
+			reason = "invalid Mason install outcome",
+		}, automatic.status().mason.items[1])
+	end)
+
 	it("derives delayed Mason status from the retained live plan without raw fields", function()
 		local plan = {
 			enabled = true,

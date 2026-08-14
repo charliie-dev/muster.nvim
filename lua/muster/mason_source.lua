@@ -1,5 +1,7 @@
 local M = {}
 
+-- This binds the loaded Mason modules to one on-disk source tree. The running
+-- Neovim process and its in-memory Lua functions remain trusted.
 M.EXPECTED_FINGERPRINT = "ffc7c0fe56fdddeb9e5ef2ede6a35561ca0c262af17da29f13a3aedfe064c5bd"
 
 local MAX_DEPTH = 32

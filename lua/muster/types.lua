@@ -69,6 +69,30 @@
 ---@field output string
 ---@field error? string
 
+---@alias muster.MasonInstallOutcome
+---| '"planned"'
+---| '"dispatched"'
+---| '"verifying"'
+---| '"completed"'
+---| '"installed_unverified"'
+---| '"failed"'
+---| '"unknown"'
+
+---@class muster.AutomaticMasonItemStatus
+---@field package string
+---@field outcome muster.MasonInstallOutcome
+---@field reason? string
+
+---@class muster.AutomaticMasonStatus
+---@field items muster.AutomaticMasonItemStatus[]
+
+---@alias muster.AutomaticState '"idle"'|'"running"'|'"reported"'|'"failed"'|'"bridge_failed"'
+
+---@class muster.AutomaticStatus
+---@field state muster.AutomaticState
+---@field reason? string
+---@field mason? muster.AutomaticMasonStatus
+
 ---@class muster.MasonInstallItem
 ---@field package string
 ---@field binaries string[]
@@ -77,7 +101,7 @@
 ---@field entries muster.Entry[]
 ---@field lsp_names string[]
 ---@field install_path string
----@field outcome "planned"|"dispatched"|"verifying"|"completed"|"installed_unverified"|"failed"|"unknown"
+---@field outcome muster.MasonInstallOutcome
 ---@field error? string
 ---@field deadline_reached? boolean
 ---@field _effects_disabled? boolean

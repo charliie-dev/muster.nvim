@@ -132,6 +132,26 @@ describe("health.check", function()
 		assert.is_truthy(has(calls, "error", "post-install verification failed"))
 	end)
 
+	it("renders corrupt Mason outcomes as unknown errors", function()
+		config.setup({ mason_install_fallback = true })
+		local saved = package.loaded["muster.automatic"]
+		package.loaded["muster.automatic"] = {
+			status = function()
+				return {
+					state = "reported",
+					mason = { items = { { package = "tool", outcome = "corrupt", reason = "raw detail" } } },
+				}
+			end,
+		}
+		local calls = render(function()
+			require("muster.health").check()
+		end)
+		package.loaded["muster.automatic"] = saved
+		assert.is_truthy(has(calls, "error", "Mason package tool: unknown"))
+		assert.is_truthy(has(calls, "error", "invalid Mason install outcome"))
+		assert.is_falsy(has(calls, "info", "corrupt"))
+	end)
+
 	it("does not load the automatic module during a read-only health check", function()
 		config.setup({ mason_install_fallback = true })
 		local saved = package.loaded["muster.automatic"]

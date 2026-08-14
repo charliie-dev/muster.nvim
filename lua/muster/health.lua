@@ -10,6 +10,8 @@
 
 local M = {}
 
+local mason_outcome = require("muster.mason_outcome")
+
 local ICON = {
 	found = "ok",
 	missing = "error",
@@ -121,15 +123,13 @@ function M.check()
 				vim.health.error("the automatic startup run failed: " .. tostring(status.reason or "unknown failure"))
 			end
 			for _, item in ipairs((status.mason and status.mason.items) or {}) do
-				local message = ("Mason package %s: %s"):format(item.package, item.outcome)
-				if item.reason then
-					message = message .. " — " .. item.reason
+				local outcome, invalid_reason = mason_outcome.normalize(item.outcome)
+				local reason = invalid_reason or item.reason
+				local message = ("Mason package %s: %s"):format(item.package, outcome)
+				if reason then
+					message = message .. " — " .. reason
 				end
-				if item.outcome == "failed" or item.outcome == "unknown" or item.outcome == "installed_unverified" then
-					vim.health.error(message)
-				else
-					vim.health.info(message)
-				end
+				vim.health[mason_outcome.HEALTH_SEVERITY[outcome] or "error"](message)
 			end
 		end
 	end

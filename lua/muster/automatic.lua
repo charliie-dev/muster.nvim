@@ -3,6 +3,7 @@
 
 local M = {}
 
+local mason_outcome = require("muster.mason_outcome")
 local sanitize = require("muster.text").sanitize
 
 local current = { state = "idle" }
@@ -384,17 +385,20 @@ function M.run(callback, opts)
 	end
 end
 
----@return { state: "idle"|"running"|"reported"|"failed"|"bridge_failed", reason?: string, mason?: table }
+---@return muster.AutomaticStatus
 function M.status()
 	local status = vim.deepcopy(current)
 	if type(live_plan) == "table" and type(live_plan.items) == "table" and #live_plan.items > 0 then
 		local items = {}
 		for _, item in ipairs(live_plan.items) do
+			local outcome, invalid_reason = mason_outcome.normalize(item.outcome)
 			local summary = {
 				package = sanitize(item.package, 120),
-				outcome = sanitize(item.outcome, 40),
+				outcome = outcome,
 			}
-			if item.error ~= nil then
+			if invalid_reason then
+				summary.reason = invalid_reason
+			elseif item.error ~= nil then
 				summary.reason = sanitize(item.error, 200)
 			end
 			items[#items + 1] = summary
