@@ -14,6 +14,16 @@ describe("config", function()
 		assert.is_table(config.get())
 	end)
 
+	it("accepts nil as defaults but rejects false", function()
+		config.setup(nil)
+		assert.is_nil(config.error())
+		assert.is_false(config.get().mason_install_fallback)
+
+		config.setup(false)
+		assert.is_string(config.error())
+		assert.is_false(config.get().mason_install_fallback)
+	end)
+
 	it("defaults Mason installation fallback to false and the startup notification to on", function()
 		config.setup({})
 		assert.is_false(config.get().mason_install_fallback)
@@ -135,5 +145,53 @@ describe("config", function()
 			},
 		})
 		assert.is_nil(config.error())
+	end)
+
+	it("copies setup input before validation and storage", function()
+		local opts = {
+			mason_install_fallback = true,
+			conform = { "stylua" },
+			lsp = { { name = "jsonls", command = "vscode-json-language-server" } },
+		}
+		config.setup(opts)
+		opts.mason_install_fallback = false
+		opts.conform[1] = "prettier"
+		opts.lsp[1].name = "mutated"
+		opts.lsp[1].command = "mutated"
+
+		local snapshot = config.get()
+		assert.is_true(snapshot.mason_install_fallback)
+		assert.same({ "stylua" }, snapshot.conform)
+		assert.same({ { name = "jsonls", command = "vscode-json-language-server" } }, snapshot.lsp)
+	end)
+
+	it("returns independent get and list snapshots", function()
+		config.setup({
+			mason_install_fallback = true,
+			conform = { "stylua" },
+			lsp = { { name = "jsonls", command = "vscode-json-language-server" } },
+		})
+		local first = config.get()
+		first.mason_install_fallback = false
+		first.conform[1] = "prettier"
+		first.lsp[1].command = "mutated"
+		local conform = config.list("conform")
+		conform[1] = "mutated"
+		local lsp = config.list("lsp")
+		lsp[1].name = "mutated"
+
+		local second = config.get()
+		assert.is_true(second.mason_install_fallback)
+		assert.same({ "stylua" }, second.conform)
+		assert.same({ { name = "jsonls", command = "vscode-json-language-server" } }, second.lsp)
+		assert.same({ "stylua" }, config.list("conform"))
+		assert.same({ { name = "jsonls", command = "vscode-json-language-server" } }, config.list("lsp"))
+	end)
+
+	it("keeps reserved option authority private", function()
+		assert.is_nil(config.OPTIONS)
+		assert.is_true(config.is_option("install"))
+		assert.is_true(config.is_option("mason_install_fallback"))
+		assert.is_false(config.is_option("lsp"))
 	end)
 end)

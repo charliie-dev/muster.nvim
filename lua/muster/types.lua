@@ -28,6 +28,18 @@
 ---@field command string
 ---@alias muster.LspEntry string|muster.LspDeclaration
 
+---@class muster.SetupOpts
+---@field mason_install_fallback? boolean Permit automatic Mason installation fallback.
+---@field notify_on_startup? boolean Emit the automatic summary when problems exist.
+---@field lsp? muster.LspEntry[]
+---@field [string] any Adapter lists are keyed by adapter id.
+
+---@class muster.Config
+---@field mason_install_fallback boolean
+---@field notify_on_startup boolean
+---@field lsp? muster.LspEntry[]
+---@field [string] any Adapter lists are keyed by adapter id.
+
 ---One subsystem, adapted to a single interface.
 ---@class muster.Adapter
 ---@field id string

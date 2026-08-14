@@ -53,12 +53,12 @@ local function unknown_keys()
 	-- A failure here must degrade the page, not abort it: this runs before the
 	-- rest of the health output.
 	pcall(registry.load_builtins)
-	local options = require("muster.config").OPTIONS
+	local is_option = require("muster.config").is_option
 	local unknown = {}
 	for key in pairs(config) do
 		-- A builtin id whose module failed to load is unregistered but is NOT a
 		-- typo: saying so would send the user to fix a line that is correct.
-		if not options[key] and not registry.get(key) and not registry.is_builtin(key) then
+		if not is_option(key) and not registry.get(key) and not registry.is_builtin(key) then
 			unknown[#unknown + 1] = key
 		end
 	end

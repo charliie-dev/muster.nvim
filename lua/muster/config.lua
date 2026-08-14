@@ -9,12 +9,8 @@ local M = {}
 
 ---Reserved keys that are options rather than adapter tool lists.
 ---`install` remains reserved so the removed option cannot become an adapter id.
-M.OPTIONS = { install = true, mason_install_fallback = true, notify_on_startup = true }
+local OPTIONS = { install = true, mason_install_fallback = true, notify_on_startup = true }
 
----@class muster.Config
----@field mason_install_fallback boolean
----@field notify_on_startup boolean
----@field [string] any[]  Tool lists, keyed by adapter id.
 local defaults = {
 	mason_install_fallback = false,
 	notify_on_startup = true,
@@ -99,7 +95,7 @@ local function validate(opts)
 	vim.validate("mason_install_fallback", opts.mason_install_fallback, "boolean", true)
 	vim.validate("notify_on_startup", opts.notify_on_startup, "boolean", true)
 	for key, value in pairs(opts) do
-		if not M.OPTIONS[key] then
+		if not OPTIONS[key] then
 			-- A list, specifically. `{ lua_ls = { ... } }` is a natural thing to
 			-- write and `#t` reports it as empty, so accepting it quietly would
 			-- mean silently checking nothing.
@@ -113,13 +109,23 @@ local function validate(opts)
 	end
 end
 
----@param opts? table
+---@param opts? muster.SetupOpts
 function M.setup(opts)
-	opts = opts or {}
-	local ok, err = pcall(validate, opts)
+	local copied, candidate
+	if opts == nil then
+		copied, candidate = true, {}
+	else
+		copied, candidate = pcall(vim.deepcopy, opts)
+	end
+	local ok, err
+	if copied then
+		ok, err = pcall(validate, candidate)
+	else
+		ok, err = false, candidate
+	end
 	if ok then
 		setup_error = nil
-		current = vim.tbl_extend("force", vim.deepcopy(defaults), opts)
+		current = vim.tbl_extend("force", vim.deepcopy(defaults), candidate)
 	else
 		-- Keep a usable config rather than leaving `current` nil: a nil config
 		-- means "setup was never called", which is a different and misleading
@@ -139,7 +145,7 @@ end
 ---mode would otherwise notify a user who never configured muster.
 ---@return muster.Config|nil
 function M.get()
-	return current
+	return current and vim.deepcopy(current) or nil
 end
 
 ---@return string|nil
@@ -147,14 +153,20 @@ function M.error()
 	return setup_error
 end
 
+---@param id string
+---@return boolean
+function M.is_option(id)
+	return OPTIONS[id] == true
+end
+
 ---The declared list for one adapter, or nil when the key was absent.
 ---@param id string
 ---@return any[]|nil
 function M.list(id)
-	if not current or M.OPTIONS[id] then
+	if not current or OPTIONS[id] then
 		return nil
 	end
-	return current[id]
+	return current[id] and vim.deepcopy(current[id]) or nil
 end
 
 ---Test seam.

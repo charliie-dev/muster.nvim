@@ -16,7 +16,7 @@ local M = {}
 ---  dap = { "codelldb" }, none_ls = { --[[ source objects ]] },
 ---})
 ---```
----@param opts? table
+---@param opts? muster.SetupOpts
 function M.setup(opts)
 	require("muster.config").setup(opts)
 	-- Trigger the automatic check from here too. `VimEnter` alone is not enough:

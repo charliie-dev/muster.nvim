@@ -530,7 +530,8 @@ describe("overlay.open", function()
 				}
 			end,
 		})
-		with_adapters({ adapter }, { install = "mason", a = { "found", "missing" } }, function(overlay)
+		with_adapters({ adapter }, { mason_install_fallback = true, a = { "found", "missing" } }, function(overlay)
+			assert.is_nil(config.error())
 			local version = require("muster.version")
 			local saved_resolve = version.resolve
 			local saved_runner = package.loaded["muster.runner"]

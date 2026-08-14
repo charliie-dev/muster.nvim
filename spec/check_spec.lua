@@ -259,10 +259,16 @@ describe("check.run accounting", function()
 		local saved = registry.load_builtins
 		registry.load_builtins = function() end
 		config.setup({})
-		-- Bypass config validation to reach entries_for's own guard.
-		local cfg = config.get()
-		cfg.a = { lua_ls = {}, gopls = {} }
+		-- Reach entries_for's defensive guard without mutating config state.
+		local saved_list = config.list
+		config.list = function(id)
+			if id == "a" then
+				return { lua_ls = {}, gopls = {} }
+			end
+			return saved_list(id)
+		end
 		local result = check.run()
+		config.list = saved_list
 		registry.load_builtins = saved
 		config.reset()
 		registry.reset()
