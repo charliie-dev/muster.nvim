@@ -45,6 +45,18 @@ local function has(calls, level, needle)
 	end)
 end
 
+describe("Mason outcome severity", function()
+	it("keeps the validity and severity table private", function()
+		local outcome = require("muster.mason_outcome")
+		assert.is_nil(outcome.HEALTH_SEVERITY)
+		outcome.HEALTH_SEVERITY = { corrupt = "info" }
+		assert.same({ "unknown", "invalid Mason install outcome" }, { outcome.normalize("corrupt") })
+		assert.equals("error", outcome.severity("corrupt"))
+		assert.equals("info", outcome.severity("completed"))
+		outcome.HEALTH_SEVERITY = nil
+	end)
+end)
+
 describe("health.check", function()
 	before_each(function()
 		config.reset()

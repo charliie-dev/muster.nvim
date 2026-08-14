@@ -1,6 +1,6 @@
 local M = {}
 
-M.HEALTH_SEVERITY = {
+local HEALTH_SEVERITY = {
 	planned = "info",
 	dispatched = "info",
 	verifying = "info",
@@ -11,10 +11,15 @@ M.HEALTH_SEVERITY = {
 }
 
 function M.normalize(value)
-	if type(value) == "string" and M.HEALTH_SEVERITY[value] then
+	if type(value) == "string" and HEALTH_SEVERITY[value] then
 		return value
 	end
 	return "unknown", "invalid Mason install outcome"
+end
+
+function M.severity(value)
+	local normalized = M.normalize(value)
+	return HEALTH_SEVERITY[normalized]
 end
 
 return M

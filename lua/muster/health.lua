@@ -129,7 +129,7 @@ function M.check()
 				if reason then
 					message = message .. " — " .. reason
 				end
-				vim.health[mason_outcome.HEALTH_SEVERITY[outcome] or "error"](message)
+				vim.health[mason_outcome.severity(outcome)](message)
 			end
 		end
 	end

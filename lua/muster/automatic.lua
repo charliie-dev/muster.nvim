@@ -99,7 +99,7 @@ local function production_opts(opts)
 	return opts, config
 end
 
----@param callback? fun(result: muster.Result, status: table)
+---@param callback? fun(result: muster.Result|nil, status: muster.AutomaticStatus)
 ---@param opts? table
 function M.run(callback, opts)
 	local config

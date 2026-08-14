@@ -109,29 +109,43 @@ local function validate(opts)
 	end
 end
 
+local function snapshot_list(id, entries)
+	local copy = {}
+	for index, entry in ipairs(entries) do
+		if id == "lsp" and type(entry) == "table" then
+			copy[index] = { name = entry.name, command = entry.command }
+		else
+			copy[index] = entry
+		end
+	end
+	return copy
+end
+
+local function snapshot(config)
+	local copy = {}
+	for key, value in pairs(config) do
+		if OPTIONS[key] then
+			copy[key] = value
+		elseif value ~= nil then
+			copy[key] = snapshot_list(key, value)
+		end
+	end
+	return copy
+end
+
 ---@param opts? muster.SetupOpts
 function M.setup(opts)
-	local copied, candidate
-	if opts == nil then
-		copied, candidate = true, {}
-	else
-		copied, candidate = pcall(vim.deepcopy, opts)
-	end
-	local ok, err
-	if copied then
-		ok, err = pcall(validate, candidate)
-	else
-		ok, err = false, candidate
-	end
+	local candidate = opts == nil and {} or opts
+	local ok, err = pcall(validate, candidate)
 	if ok then
 		setup_error = nil
-		current = vim.tbl_extend("force", vim.deepcopy(defaults), candidate)
+		current = vim.tbl_extend("force", snapshot(defaults), snapshot(candidate))
 	else
 		-- Keep a usable config rather than leaving `current` nil: a nil config
 		-- means "setup was never called", which is a different and misleading
 		-- statement. The rejection is recorded and surfaced instead.
 		setup_error = tostring(err)
-		current = vim.deepcopy(defaults)
+		current = snapshot(defaults)
 		vim.notify(
 			("muster: your configuration was rejected, so only defaults are in effect: %s"):format(err),
 			vim.log.levels.ERROR,
@@ -145,7 +159,7 @@ end
 ---mode would otherwise notify a user who never configured muster.
 ---@return muster.Config|nil
 function M.get()
-	return current and vim.deepcopy(current) or nil
+	return current and snapshot(current) or nil
 end
 
 ---@return string|nil
@@ -166,7 +180,7 @@ function M.list(id)
 	if not current or OPTIONS[id] then
 		return nil
 	end
-	return current[id] and vim.deepcopy(current[id]) or nil
+	return current[id] and snapshot_list(id, current[id]) or nil
 end
 
 ---Test seam.

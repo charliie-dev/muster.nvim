@@ -165,6 +165,36 @@ describe("config", function()
 		assert.same({ { name = "jsonls", command = "vscode-json-language-server" } }, snapshot.lsp)
 	end)
 
+	it("preserves opaque adapter entry identity while isolating list containers", function()
+		local timer = assert(vim.uv.new_timer())
+		local opaque = setmetatable({ value = 1 }, { __index = { marker = true } })
+		local thread = coroutine.create(function() end)
+		local opts = { third_party = { timer, opaque, thread } }
+		local ok, err = pcall(function()
+			config.setup(opts)
+			assert.is_nil(config.error())
+			opts.third_party[1] = "caller mutation"
+
+			local first = config.list("third_party")
+			assert.equals(timer, first[1])
+			assert.equals(opaque, first[2])
+			assert.equals(thread, first[3])
+			first[1] = "list mutation"
+
+			local from_get = config.get().third_party
+			assert.equals(timer, from_get[1])
+			assert.equals(opaque, from_get[2])
+			assert.equals(thread, from_get[3])
+			from_get[2] = "get mutation"
+			assert.equals(opaque, config.list("third_party")[2])
+
+			opaque.value = 2
+			assert.equals(2, config.list("third_party")[2].value)
+		end)
+		pcall(timer.close, timer)
+		assert.is_true(ok, err)
+	end)
+
 	it("returns independent get and list snapshots", function()
 		config.setup({
 			mason_install_fallback = true,
