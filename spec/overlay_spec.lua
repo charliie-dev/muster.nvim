@@ -359,7 +359,7 @@ describe("overlay.lines", function()
 						probe = { status = "missing", binary = "prettier" },
 					},
 				},
-				diagnostics = { "lint live query failed: boom" },
+				diagnostics = { "nvim_lint live query failed: boom" },
 				notes = {},
 			}
 			local lines = overlay.lines(view, {
@@ -377,7 +377,7 @@ describe("overlay.lines", function()
 			assert.is_truthy(text:find("prettier", 1, true))
 			assert.is_truthy(text:find("not on $PATH", 1, true))
 			assert.is_truthy(text:find("* discovered live", 1, true))
-			assert.is_truthy(text:find("lint live query failed: boom", 1, true))
+			assert.is_truthy(text:find("nvim_lint live query failed: boom", 1, true))
 		end)
 	end)
 

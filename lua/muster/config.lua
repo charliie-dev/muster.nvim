@@ -8,8 +8,8 @@
 local M = {}
 
 ---Reserved keys that are options rather than adapter tool lists.
----`install` remains reserved so the removed option cannot become an adapter id.
-local OPTIONS = { install = true, mason_install_fallback = true, notify_on_startup = true }
+---Removed public keys remain reserved so they cannot become adapter ids.
+local OPTIONS = { install = true, lint = true, mason_install_fallback = true, notify_on_startup = true }
 
 local defaults = {
 	mason_install_fallback = false,
@@ -26,18 +26,21 @@ local current = nil
 ---@type string|nil
 local setup_error = nil
 
-local function valid_lsp_name(value)
+local function valid_name(value)
 	return type(value) == "string"
 		and #value <= 128
 		and value ~= "*"
 		and value:match("^[A-Za-z0-9][A-Za-z0-9_.-]*$") ~= nil
 end
 
-local function valid_lsp_command(value)
+local function valid_command(value)
 	return type(value) == "string" and #value <= 255 and value:match("^[A-Za-z0-9][A-Za-z0-9_.+-]*$") ~= nil
 end
 
-local function validate_lsp(entries)
+local function validate_declarations(id, label, entries)
+	if getmetatable(entries) ~= nil then
+		error(("%s: expected a plain list without a metatable"):format(id), 0)
+	end
 	local declarations = {}
 	for index, entry in ipairs(entries) do
 		local name
@@ -45,17 +48,18 @@ local function validate_lsp(entries)
 		local kind = type(entry)
 		if kind == "string" then
 			name = entry
-			if not valid_lsp_name(name) then
-				error(("lsp[%d]: expected a valid LSP server name"):format(index), 0)
+			if not valid_name(name) then
+				error(("%s[%d]: expected a valid %s name"):format(id, index, label), 0)
 			end
 		elseif kind == "table" then
 			if getmetatable(entry) ~= nil then
-				error(("lsp[%d]: expected a plain { name, command } map without a metatable"):format(index), 0)
+				error(("%s[%d]: expected a plain { name, command } map without a metatable"):format(id, index), 0)
 			end
 			for key in pairs(entry) do
 				if key ~= "name" and key ~= "command" then
 					error(
-						("lsp[%d]: unexpected key %s; expected exactly name and command"):format(
+						("%s[%d]: unexpected key %s; expected exactly name and command"):format(
+							id,
 							index,
 							vim.inspect(key)
 						),
@@ -64,25 +68,36 @@ local function validate_lsp(entries)
 				end
 			end
 			if entry.name == nil or entry.command == nil then
-				error(("lsp[%d]: expected exactly { name, command }"):format(index), 0)
+				error(("%s[%d]: expected exactly { name, command }"):format(id, index), 0)
 			end
 			name = entry.name
 			command = entry.command
-			if not valid_lsp_name(name) then
-				error(("lsp[%d].name: expected a valid LSP server name"):format(index), 0)
+			if not valid_name(name) then
+				error(("%s[%d].name: expected a valid %s name"):format(id, index, label), 0)
 			end
-			if not valid_lsp_command(command) then
-				error(("lsp[%d].command: expected a bare executable name"):format(index), 0)
+			if not valid_command(command) then
+				error(("%s[%d].command: expected a bare executable name"):format(id, index), 0)
 			end
 		else
-			error(("lsp[%d]: expected a server name or { name, command } map"):format(index), 0)
+			error(("%s[%d]: expected a name or { name, command } map"):format(id, index), 0)
 		end
 
 		local previous = declarations[name]
 		if previous and (previous.kind ~= kind or previous.command ~= command) then
-			error(("lsp: conflicting declarations for %q"):format(name), 0)
+			error(("%s: conflicting declarations for %q"):format(id, name), 0)
 		end
 		declarations[name] = { kind = kind, command = command }
+	end
+end
+
+local function validate_conform(entries)
+	if getmetatable(entries) ~= nil then
+		error("conform: expected a plain list without a metatable", 0)
+	end
+	for index, entry in ipairs(entries) do
+		if type(entry) ~= "string" or entry == "" or #entry > 128 or entry:find("[%z\1-\31\127]") then
+			error(("conform[%d]: expected a non-empty printable formatter name of at most 128 bytes"):format(index), 0)
+		end
 	end
 end
 
@@ -91,6 +106,9 @@ local function validate(opts)
 	vim.validate("opts", opts, "table")
 	if rawget(opts, "install") ~= nil then
 		error("muster: `install` was removed; use `mason_install_fallback = true` to permit Mason installs", 0)
+	end
+	if rawget(opts, "lint") ~= nil then
+		error("muster: `lint` was renamed; use the `nvim_lint` setup key", 0)
 	end
 	vim.validate("mason_install_fallback", opts.mason_install_fallback, "boolean", true)
 	vim.validate("notify_on_startup", opts.notify_on_startup, "boolean", true)
@@ -103,7 +121,11 @@ local function validate(opts)
 				return v == nil or vim.islist(v)
 			end, true, "a list of tool entries (got a map?)")
 			if key == "lsp" and value ~= nil then
-				validate_lsp(value)
+				validate_declarations("lsp", "LSP server", value)
+			elseif key == "nvim_lint" and value ~= nil then
+				validate_declarations("nvim_lint", "nvim-lint linter", value)
+			elseif key == "conform" and value ~= nil then
+				validate_conform(value)
 			end
 		end
 	end
@@ -112,7 +134,7 @@ end
 local function snapshot_list(id, entries)
 	local copy = {}
 	for index, entry in ipairs(entries) do
-		if id == "lsp" and type(entry) == "table" then
+		if (id == "lsp" or id == "nvim_lint") and type(entry) == "table" then
 			copy[index] = { name = entry.name, command = entry.command }
 		else
 			copy[index] = entry

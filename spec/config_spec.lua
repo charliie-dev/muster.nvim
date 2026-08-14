@@ -218,10 +218,87 @@ describe("config", function()
 		assert.same({ { name = "jsonls", command = "vscode-json-language-server" } }, config.list("lsp"))
 	end)
 
+	it("accepts and snapshots structured nvim-lint declarations", function()
+		local opts = {
+			nvim_lint = { "selene", { name = "oxlint", command = "oxlint" } },
+		}
+		config.setup(opts)
+		assert.is_nil(config.error())
+		opts.nvim_lint[2].command = "mutated"
+		local first = config.get()
+		first.nvim_lint[2].name = "mutated"
+		local listed = config.list("nvim_lint")
+		listed[2].command = "mutated"
+		assert.same({ "selene", { name = "oxlint", command = "oxlint" } }, config.get().nvim_lint)
+		assert.same({ "selene", { name = "oxlint", command = "oxlint" } }, config.list("nvim_lint"))
+	end)
+
+	it("rejects invalid nvim-lint declarations and conflicting duplicates", function()
+		local metatable_entry = setmetatable({ name = "oxlint", command = "oxlint" }, {})
+		local invalid = {
+			7,
+			{},
+			{ name = "oxlint" },
+			{ command = "oxlint" },
+			{ name = "oxlint", command = "oxlint", extra = true },
+			{ name = "bad name", command = "oxlint" },
+			{ name = "oxlint", command = "bin/oxlint" },
+			metatable_entry,
+		}
+		for index, entry in ipairs(invalid) do
+			config.setup({ nvim_lint = { entry } })
+			assert.is_string(config.error(), ("fixture %d must be rejected"):format(index))
+		end
+		for _, entries in ipairs({
+			{ "oxlint", { name = "oxlint", command = "oxlint" } },
+			{ { name = "oxlint", command = "oxlint" }, "oxlint" },
+			{ { name = "oxlint", command = "a" }, { name = "oxlint", command = "b" } },
+			{ { name = "oxlint", command = "b" }, { name = "oxlint", command = "a" } },
+		}) do
+			config.setup({ nvim_lint = entries })
+			assert.is_string(config.error())
+		end
+	end)
+
+	it("keeps identical nvim-lint duplicates for the normal duplicate warning", function()
+		config.setup({
+			nvim_lint = {
+				"selene",
+				"selene",
+				{ name = "oxlint", command = "oxlint" },
+				{ name = "oxlint", command = "oxlint" },
+			},
+		})
+		assert.is_nil(config.error())
+	end)
+
+	it("rejects malformed Conform formatter lists", function()
+		local fixtures = {
+			{ "" },
+			{ "bad\nname" },
+			{ string.rep("x", 129) },
+			{ { name = "stylua" } },
+			setmetatable({ "stylua" }, {}),
+		}
+		for index, conform in ipairs(fixtures) do
+			config.setup({ conform = conform })
+			assert.is_string(config.error(), ("fixture %d must be rejected"):format(index))
+		end
+	end)
+
+	it("always rejects the old lint setup tombstone", function()
+		for _, value in ipairs({ {}, { "selene" }, false, "selene" }) do
+			config.setup({ lint = value })
+			assert.is_truthy(config.error():find("nvim_lint", 1, true))
+			assert.is_nil(config.list("lint"))
+		end
+	end)
+
 	it("keeps reserved option authority private", function()
 		assert.is_nil(config.OPTIONS)
 		assert.is_true(config.is_option("install"))
+		assert.is_true(config.is_option("lint"))
 		assert.is_true(config.is_option("mason_install_fallback"))
-		assert.is_false(config.is_option("lsp"))
+		assert.is_false(config.is_option("nvim_lint"))
 	end)
 end)

@@ -12,7 +12,7 @@ local M = {}
 ---Setup keys are adapter ids:
 ---```lua
 ---require("muster").setup({
----  lsp = { "lua_ls" }, conform = { "stylua" }, lint = { "selene" },
+---  lsp = { "lua_ls" }, conform = { "stylua" }, nvim_lint = { "selene" },
 ---  dap = { "codelldb" }, none_ls = { --[[ source objects ]] },
 ---})
 ---```

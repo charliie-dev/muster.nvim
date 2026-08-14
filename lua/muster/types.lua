@@ -28,16 +28,29 @@
 ---@field command string
 ---@alias muster.LspEntry string|muster.LspDeclaration
 
+---@class (exact) muster.NvimLintDeclaration
+---@field name string
+---@field command string
+---@alias muster.NvimLintEntry string|muster.NvimLintDeclaration
+
 ---@class muster.SetupOpts
 ---@field mason_install_fallback? boolean Permit automatic Mason installation fallback.
 ---@field notify_on_startup? boolean Emit the automatic summary when problems exist.
 ---@field lsp? muster.LspEntry[]
+---@field conform? string[]
+---@field nvim_lint? muster.NvimLintEntry[]
+---@field lint? nil Rejected tombstone; use nvim_lint.
+---@field install? nil Rejected tombstone; use mason_install_fallback.
 ---@field [string] any Adapter lists are keyed by adapter id.
 
 ---@class muster.Config
 ---@field mason_install_fallback boolean
 ---@field notify_on_startup boolean
 ---@field lsp? muster.LspEntry[]
+---@field conform? string[]
+---@field nvim_lint? muster.NvimLintEntry[]
+---@field lint? nil Rejected tombstone; use nvim_lint.
+---@field install? nil Rejected tombstone; use mason_install_fallback.
 ---@field [string] any Adapter lists are keyed by adapter id.
 
 ---One subsystem, adapted to a single interface.

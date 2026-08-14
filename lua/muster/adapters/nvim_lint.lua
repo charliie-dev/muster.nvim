@@ -11,7 +11,7 @@ local probe = require("muster.probe")
 ---@type muster.Adapter
 ---@diagnostic disable-next-line: missing-fields
 local M = {
-	id = "lint",
+	id = "nvim_lint",
 }
 
 ---@return boolean loaded
@@ -20,13 +20,13 @@ function M.available()
 	return require("muster.host").status("lint", "lua/lint.lua")
 end
 
----@param entry any
+---@param entry muster.NvimLintEntry
 ---@return string
 function M.identity(entry)
-	return tostring(entry)
+	return type(entry) == "table" and entry.name or tostring(entry)
 end
 
----@param entry any
+---@param entry muster.NvimLintEntry
 ---@param _bufnr integer
 ---@return muster.Probe
 function M.probe(entry, _bufnr)
@@ -53,6 +53,9 @@ function M.probe(entry, _bufnr)
 
 	if type(linter) ~= "table" then
 		return probe.broken(("linter resolved to a %s, expected a table"):format(type(linter)))
+	end
+	if type(entry) == "table" then
+		return probe.resolve(entry.command)
 	end
 	if type(linter.cmd) == "function" then
 		return probe.unverifiable("cmd is a function: the linter resolves it per run")

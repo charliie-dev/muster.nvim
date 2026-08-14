@@ -29,7 +29,11 @@ end
 local function with_adapters(adapters, opts, fn)
 	registry.reset()
 	for _, adapter in ipairs(adapters) do
-		registry.register(adapter)
+		if registry.is_builtin(adapter.id) then
+			registry.all()[adapter.id] = adapter
+		else
+			registry.register(adapter)
+		end
 	end
 	-- load_builtins() would re-add the real five; stub it out for the duration.
 	local saved = registry.load_builtins
@@ -408,37 +412,37 @@ describe("registry.load_builtins", function()
 		registry.reset()
 	end)
 
-	it("reports a third-party adapter squatting on a built-in id", function()
-		registry.register({
-			id = "conform",
-			available = function()
-				return true
-			end,
-			identity = tostring,
-			probe = function()
-				return { status = "missing", binary = "x" }
-			end,
-		})
-		local failures = registry.load_builtins()
-		assert.is_string(failures.conform, "a shadowed builtin must not yield silently")
-		assert.is_truthy(failures.conform:find("third-party", 1, true))
+	it("rejects a third-party adapter squatting on a built-in id before it can preempt", function()
+		assert.has_error(function()
+			registry.register({
+				id = "conform",
+				available = function()
+					return true
+				end,
+				identity = tostring,
+				probe = function()
+					return { status = "missing", binary = "x" }
+				end,
+			})
+		end)
+		assert.is_nil(registry.get("conform"))
 	end)
 
 	it("keeps the original load error across repeated calls", function()
 		-- A second require of a module that raised returns Lua's "loop or
 		-- previous error" sentinel, which names a require loop that does not
 		-- exist and loses the real cause.
-		package.loaded["muster.adapters.lint"] = nil
-		local saved = package.preload["muster.adapters.lint"]
-		package.preload["muster.adapters.lint"] = function()
+		package.loaded["muster.adapters.nvim_lint"] = nil
+		local saved = package.preload["muster.adapters.nvim_lint"]
+		package.preload["muster.adapters.nvim_lint"] = function()
 			error("REAL CAUSE: something specific")
 		end
 		local first = registry.load_builtins()
 		local second = registry.load_builtins()
-		package.preload["muster.adapters.lint"] = saved
-		package.loaded["muster.adapters.lint"] = nil
+		package.preload["muster.adapters.nvim_lint"] = saved
+		package.loaded["muster.adapters.nvim_lint"] = nil
 		registry.reset()
-		assert.is_truthy(first.lint:find("REAL CAUSE", 1, true))
-		assert.is_truthy(second.lint:find("REAL CAUSE", 1, true), "the cause must survive a second call")
+		assert.is_truthy(first.nvim_lint:find("REAL CAUSE", 1, true))
+		assert.is_truthy(second.nvim_lint:find("REAL CAUSE", 1, true), "the cause must survive a second call")
 	end)
 end)

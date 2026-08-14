@@ -57,13 +57,33 @@ describe("registry", function()
 		end)
 	end)
 
+	it("rejects reserved, malformed, and built-in third-party ids", function()
+		local ids = {
+			"",
+			"lint",
+			"install",
+			"mason_install_fallback",
+			"notify_on_startup",
+			"conform",
+			"nvim_lint",
+			"bad\nname",
+			string.rep("x", 129),
+		}
+		for _, id in ipairs(ids) do
+			assert.has_error(function()
+				registry.register(fake(id))
+			end)
+		end
+	end)
+
 	it("loads the five builtins idempotently", function()
 		registry.load_builtins()
 		local first = registry.get("conform")
 		registry.load_builtins()
 		assert.equals(first, registry.get("conform"))
-		for _, id in ipairs({ "lsp", "conform", "lint", "dap", "none_ls" }) do
+		for _, id in ipairs({ "lsp", "conform", "nvim_lint", "dap", "none_ls" }) do
 			assert.is_table(registry.get(id), id .. " should be registered")
 		end
+		assert.is_nil(registry.get("lint"))
 	end)
 end)

@@ -74,7 +74,7 @@ describe("report.lines", function()
 
 	it("lists unverifiable entries at all", function()
 		local res = result({
-			entries = { entry("lint", "z", { status = "unverifiable", reason = "cmd is a function" }) },
+			entries = { entry("nvim_lint", "z", { status = "unverifiable", reason = "cmd is a function" }) },
 		})
 		assert.is_truthy(#report.lines(res) > 0, '"we could not tell" must not render as silence')
 	end)
@@ -94,7 +94,7 @@ describe("report advice rendering", function()
 					{ provider = "nix", action = "declare", package = "stylua.out" },
 					{ provider = "mise", action = "declare", package = "stylua" },
 				}),
-				entry("lint", "ambiguous", { status = "missing", binary = "tool" }, {
+				entry("nvim_lint", "ambiguous", { status = "missing", binary = "tool" }, {
 					{ provider = "nix", action = "declare" },
 				}),
 			},
