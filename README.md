@@ -15,13 +15,14 @@ an explicit `mason_install_fallback = true` opt-in on the automatic startup run.
 
 ### Read-only mode
 
-With lazy.nvim, load the host integrations before muster when the first real
-buffer opens. Each dependency below is expected to have its own `opts` or
+With lazy.nvim, muster can load on the first `BufReadPost`/`BufNewFile` event or
+when `:Muster` is invoked. Lazy loads the dependencies before the plugin on
+either trigger. Each dependency below is expected to have its own `opts` or
 `config` that requires and configures the host module before muster's setup
 runs; a bare repository dependency may not make that adapter available.
 
 ```lua
-{
+return {
   "charliie-dev/muster.nvim",
   event = { "BufReadPost", "BufNewFile" },
   cmd = "Muster",
@@ -38,7 +39,10 @@ runs; a bare repository dependency may not make that adapter available.
       { name = "yamlls", command = "yaml-language-server" },
     },
     conform = { "stylua" },
-    lint = { "selene" },
+    nvim_lint = {
+      "selene",
+      { name = "oxlint", command = "oxlint" },
+    },
     dap = { "codelldb" },
     mason_install_fallback = false,
     notify_on_startup = true,
@@ -48,11 +52,13 @@ runs; a bare repository dependency may not make that adapter available.
 
 ### Optional Mason mode
 
-Load and set up Mason before muster. Append Mason's bin directory to the PATH
-environment variable. As in read-only mode, the listed host dependencies must
-have their own `opts` or `config` that finishes host setup before muster runs.
+Load and set up Mason as a dependency before muster on either the buffer-event
+or `:Muster` trigger. Append Mason's bin directory to the PATH environment
+variable. As in read-only mode, the listed host dependencies must have their own
+`opts` or `config` that finishes host setup before muster runs.
 
 ```lua
+return {
 {
   "mason-org/mason.nvim",
   cmd = { "Mason", "MasonInstall", "MasonUninstall", "MasonUpdate" },
@@ -78,11 +84,15 @@ have their own `opts` or `config` that finishes host setup before muster runs.
       { name = "yamlls", command = "yaml-language-server" },
     },
     conform = { "stylua" },
-    lint = { "selene" },
+    nvim_lint = {
+      "selene",
+      { name = "oxlint", command = "oxlint" },
+    },
     dap = { "codelldb" },
     mason_install_fallback = true,
     notify_on_startup = true,
   },
+},
 }
 ```
 
@@ -92,11 +102,12 @@ directory off the PATH environment variable.
 
 ## Configuration
 
-A full lazy.nvim spec can declare every built-in adapter and both options. The
-config callback runs only after the buffer event and after its host dependencies:
+A full lazy.nvim spec can declare every built-in adapter and both options. Its
+config callback runs after the dependencies when either the buffer event or the
+`:Muster` command triggers the plugin:
 
 ```lua
-{
+return {
   "charliie-dev/muster.nvim",
   event = { "BufReadPost", "BufNewFile" },
   cmd = "Muster",
@@ -116,7 +127,10 @@ config callback runs only after the buffer event and after its host dependencies
         { name = "yamlls", command = "yaml-language-server" },
       },
       conform = { "stylua", "prettierd" },
-      lint = { "selene" },
+      nvim_lint = {
+        "selene",
+        { name = "oxlint", command = "oxlint" },
+      },
       dap = { "codelldb" },
       none_ls = {
         null_ls.builtins.formatting.stylua,
@@ -140,7 +154,7 @@ declaration keeps `name` as the server identity but makes its explicit `command`
 authoritative for PATH probing, provider advice, and Mason package mapping:
 
 ```lua
-lsp = {
+local lsp = {
   "lua_ls",
   { name = "jsonls", command = "vscode-json-language-server" },
   { name = "yamlls", command = "yaml-language-server" },
@@ -156,15 +170,50 @@ transport. Finding the declared global command does not prove which transport
 the LSP function will launch. muster never invokes the function, changes the
 catalog entry, or enables the server.
 
+`nvim_lint` entries accept a linter name or an exact `{ name, command }` map.
+The string form uses the command in nvim-lint's linter definition; a
+function-form command is `unverifiable` because muster does not invoke it. The
+explicit form probes the named bare executable instead:
+
+```lua
+local nvim_lint = {
+  "selene",
+  { name = "oxlint", command = "oxlint" },
+}
+```
+
+The named `lint.linters[name]` catalog entry must exist in both forms. An
+explicit command is only a probe prerequisite; it neither defines the linter nor
+proves the project-aware command nvim-lint will later choose. With
+`mason_install_fallback = false`, a missing explicit command receives advice
+only. With `true`, it is eligible for Mason installation. For a linter such as
+oxlint that may select `node_modules/.bin/oxlint` per project, opting in can
+therefore install a duplicate global tool even though nvim-lint would use the
+project-local copy.
+
+Conform declarations remain string-only formatter names. If local integration
+settings call these lists `formatter_deps` and `linter_deps`, pass the former to
+`conform` and the latter to `nvim_lint`; those setting names are not muster setup
+keys.
+
+The DAP setup key remains `dap`. Muster's built-in example declares only
+`codelldb`, whose registered nvim-dap adapter exposes a tool executable.
+`dap-go` and `dap-python` are language-plugin-owned integrations, not Muster
+adapters or install declarations. Project-aware choices such as a user-approved
+`uv` environment, `.env` interpreter, or ambient Python belong in that local
+nvim-dap integration. Muster does not choose, approve, or provision them.
+
 The removed `install` option is always rejected, including `install = false`.
-Use `mason_install_fallback = false` for read-only operation or `true` for the
-single installation-capable automatic path.
+The old `lint` setup key is also a rejected tombstone, including empty or false
+values; rename it to `nvim_lint`. Use `mason_install_fallback = false` for
+read-only operation or `true` for the single installation-capable automatic
+path.
 
 Third-party integrations use the same adapter interface and setup key. Register
 them inside the lazy config callback before calling setup:
 
 ```lua
-{
+return {
   "charliie-dev/muster.nvim",
   event = { "BufReadPost", "BufNewFile" },
   cmd = "Muster",
@@ -203,13 +252,17 @@ configuration error rather than ignored.
 - `:Muster` opens a fresh report for the current buffer. Its first section shows
   tools live in that buffer; the second shows all other declared tools.
 - `:checkhealth muster` synchronously checks configuration and declared tools.
-- With the lazy.nvim examples above, the automatic check runs once after the
-  first real buffer opens and a UI attaches. `VimEnter` provides the fallback
-  for headless sessions. Its summary can notify about missing, unknown, broken,
-  or unverifiable tools and skipped host plugins. It omits found tools and is
-  silent when nothing needs attention. Set `notify_on_startup = false` to
-  disable only this summary. Mason install lifecycle INFO/ERROR notifications
-  remain enabled when installation authority is opted in.
+- When a lazy.nvim example is loaded by the first buffer event, the automatic
+  check runs once after a UI attaches; `VimEnter` is the fallback when the plugin
+  was already loaded, including in a headless session. If `:Muster` first loads
+  and configures the plugin after `VimEnter`, setup schedules a separate
+  automatic run. The command remains read-only, but that later automatic run can
+  perform fallback installation when `mason_install_fallback = true`. The
+  summary can notify about missing, unknown, broken, or unverifiable tools and
+  skipped host plugins. It omits found tools and is silent when nothing needs
+  attention. Set `notify_on_startup = false` to disable only this summary. Mason
+  install lifecycle INFO/WARN/ERROR notifications remain enabled when
+  installation authority is opted in.
 
 Both commands are inspection surfaces: they do not run provider enrichment,
 refresh Mason, or install anything.
@@ -287,30 +340,68 @@ dispatched. muster uses Mason's generic package installer; it does not call a
 mason-lspconfig install shortcut, run `:MasonInstall`, or directly enable an LSP
 server. LSP activation remains the user's or mason-lspconfig's policy.
 
-Each dispatched package produces an INFO start notification. A verified Unix
-success produces an INFO success notification. Installer failure, an unknown
-dispatch or deadline outcome, and a successful install that cannot be verified
-produce distinct ERROR notifications. These lifecycle notifications and
+Each dispatched package produces an INFO start notification. Terminal
+notifications and `:checkhealth muster` use the same result severity: only
+`completed/found/full` is INFO, `completed/found/partial` is WARN, and every
+other terminal result is ERROR. Automatic-run degradation is WARN; an automatic
+or safe-context bridge failure is ERROR. These lifecycle notifications and
 installation authority are independent of `notify_on_startup`; disabling the
 startup summary suppresses neither.
 
-A `completed` outcome means the callback and persisted receipt, captured
-registry/compiler inputs, and every expected Unix Mason bin link and receipt
-target were verified. `failed` means either a pre-dispatch contract,
-revalidation, detached-package, or reservation check failed, or the installer
-callback reported failure. `unknown` means dispatch, handle, or deadline outcome
-could not be established.
-`installed_unverified` means Mason reported success but receipt, source, path,
-or safe-context verification did not complete or pass. The package may still be
-installed. muster retains such packages and never automatically rolls back,
-uninstalls, or cleans them up. One package's failure does not change another
-package's outcome.
+Installation results have three independent axes:
+
+- `outcome` is lifecycle progress: `planned`, `dispatched`, `verifying`,
+  `completed`, `failed`, or `unknown`. `completed` means the installer callback
+  returned success and the verification phase reached a terminal result,
+  including when a verification safe-context bridge could not run or the
+  verification deadline expired; by itself it is not success.
+- `availability` is the post-install executable probe: `not_checked`, `found`,
+  `missing`, `unverifiable`, `unknown`, or `broken`.
+- `attestation` is the integrity proof: `not_checked`, `full`, `partial`, or
+  `failed`. Reasons on availability and attestation remain independent.
+
+These are all legal result shapes; malformed or stale combinations fail closed
+to `unknown/not_checked/not_checked`:
+
+```text
+outcome | availability | attestation | level | detail
+planned | not_checked | not_checked | INFO | none; internal state
+dispatched | not_checked | not_checked | INFO | none; internal state
+verifying | not_checked | not_checked | INFO | none; internal state
+failed | not_checked | not_checked | ERROR | operation error; rejected contract or failed installer callback
+unknown | not_checked | not_checked | ERROR | operation error; dispatch, handle, or deadline outcome unknown
+completed | found | full | INFO | none; only verified success
+completed | found | partial | WARN | attestation reason; npm install or supported Windows partial case
+completed | found | failed | ERROR | attestation reason; receipt or integrity proof failed
+completed | missing | failed | ERROR | both reasons; expected executable missing
+completed | unverifiable | failed | ERROR | both reasons; executable cannot be safely probed
+completed | unknown | failed | ERROR | both reasons; host lookup could not resolve executable
+completed | broken | failed | ERROR | both reasons; executable probing broke
+completed | not_checked | failed | ERROR | both reasons; availability was not checked
+```
+
+### Examples <!-- -->
+
+- A successful npm callback with every executable found and every proof except
+  the compiler-policy proof records `completed/found/partial` and WARN.
+- A failed callback records `failed/not_checked/not_checked` and ERROR.
+- A successful callback with a missing executable records
+  `completed/missing/failed` and ERROR; a receipt mismatch with a found
+  executable records `completed/found/failed` and ERROR.
+- On Windows, only a FULL-policy compiler with the exact supported `.cmd`
+  receipt and containment proofs can record `completed/found/partial`; Windows
+  plus a PARTIAL compiler fails attestation.
+
+Successfully installed packages are retained after partial or failed
+attestation. Muster never automatically rolls them back, uninstalls them, or
+cleans them up. One package's result does not change another package's result,
+and no result path enables an LSP server.
 
 ## Known limits
 
 - muster itself never force-loads host plugins. The lazy.nvim examples ask Lazy
   to load the host specs first, but those specs must still run their own setup
-  and require their main modules. Conform, lint, DAP, and none-ls are skipped as
+  and require their main modules. Conform, nvim-lint, DAP, and none-ls are skipped as
   "host plugin not loaded" until that happens. LSP is the exception: its adapter
   uses Neovim's built-in `vim.lsp.config`, so an absent catalog server is
   `unknown` rather than a skipped host, even when an explicit command was given.
@@ -321,19 +412,22 @@ package's outcome.
   and report `unverifiable`. An explicit `{ name, command }` declaration can
   verify a bare executable prerequisite without invoking the function, but it
   cannot prove the root-specific transport the function later launches.
-- Verified Mason compiler completion is limited to this exact allowlist: cargo,
+- Full Mason attestation is limited to this exact compiler allowlist: cargo,
   composer, gem, golang, luarocks, nuget, and opam. The `npm`, `pypi`, `github`,
-  `mason`, `generic`, `openvsx`, and `unknown` compiler types always remain
-  `installed_unverified` after a successful install. The jsonls and yamlls
-  declarations above are npm-backed examples, so their successful Mason
-  installs do not reach Muster's `completed` outcome.
+  `mason`, `generic`, and `openvsx` compiler types can reach only partial
+  attestation on non-Windows when every other proof passes. An `unknown` or
+  future compiler type fails attestation. The jsonls and yamlls declarations
+  above are npm-backed examples, so a successful callback with found binaries
+  can reach `completed/found/partial`, not verified success.
 - Mason's runtime fingerprint detects on-disk Mason Lua source drift from the
   pinned implementation. This is a trusted-process check: the running Neovim
   process and in-memory Lua functions are trusted. It does not claim to defend
   against same-process code monkeypatching functions during installation.
-- Windows Mason callback success is always `installed_unverified`; exact `.cmd`
-  wrapper, PATHEXT, separator, case, and drive verification is not supported yet.
-  The successfully installed package is retained and no LSP is enabled.
+- Windows cannot reach full attestation. A FULL-policy compiler can reach
+  partial only with the supported exact `.cmd` receipt key and target, package
+  containment, stable compiler/fingerprint evidence, Mason source, and Mason-bin
+  path proofs. A PARTIAL or unknown compiler fails attestation. The installed
+  package is retained and no LSP is enabled.
 - Overlay version probing is best effort. Its generic fallback tries
   `--version`, `version`, and `-version` only when `:Muster` is opened. It can
   miss date-only versions, and a tool's version command can have side effects.
