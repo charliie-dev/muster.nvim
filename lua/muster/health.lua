@@ -10,7 +10,8 @@
 
 local M = {}
 
-local mason_outcome = require("muster.mason_outcome")
+local mason_result = require("muster.mason_result")
+local sanitize = require("muster.text").sanitize
 
 local ICON = {
 	found = "ok",
@@ -112,25 +113,35 @@ function M.check()
 	-- its pure-Lua terminal state is safe to inspect on either configuration path.
 	local automatic = package.loaded["muster.automatic"]
 	if type(automatic) == "table" and type(automatic.status) == "function" then
-		local ok, status = pcall(automatic.status)
-		if ok and type(status) == "table" then
-			if status.state == "bridge_failed" then
-				vim.health.error(
-					"the automatic Mason run could not cross a safe-context bridge: "
-						.. tostring(status.reason or "unknown failure")
-				)
-			elseif status.state == "failed" then
-				vim.health.error("the automatic startup run failed: " .. tostring(status.reason or "unknown failure"))
+		local ok, raw_status = pcall(automatic.status)
+		local status = mason_result.normalize_status(ok and raw_status or nil)
+		local status_level = mason_result.status_severity(status)
+		if status.state == "bridge_failed" then
+			vim.health[status_level]("the automatic Mason run could not cross a safe-context bridge: " .. status.reason)
+		elseif status.state == "failed" then
+			if status.reason == "malformed automatic status" then
+				vim.health[status_level]("automatic status is unavailable or malformed")
+			else
+				vim.health[status_level]("the automatic startup run failed: " .. status.reason)
 			end
-			for _, item in ipairs((status.mason and status.mason.items) or {}) do
-				local outcome, invalid_reason = mason_outcome.normalize(item.outcome)
-				local reason = invalid_reason or item.reason
-				local message = ("Mason package %s: %s"):format(item.package, outcome)
-				if reason then
-					message = message .. " — " .. reason
+		elseif status.state == "reported" and status.reason then
+			vim.health[status_level]("the automatic startup run degraded: " .. status.reason)
+		end
+
+		for _, item in ipairs((status.mason and status.mason.items) or {}) do
+			local package = sanitize(item.package, 80)
+			local message = ("Mason package %s: outcome=%s availability=%s attestation=%s"):format(
+				package,
+				item.outcome,
+				item.availability,
+				item.attestation
+			)
+			for _, field in ipairs({ "error", "availability_reason", "attestation_reason" }) do
+				if item[field] then
+					message = message .. ("; %s=%s"):format(field, item[field])
 				end
-				vim.health[mason_outcome.severity(outcome)](message)
 			end
+			vim.health[mason_result.severity(item)](message)
 		end
 	end
 

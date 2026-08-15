@@ -194,7 +194,9 @@ local function run_case(kind)
 		local resolved = require("muster.probe").resolve(BINARY)
 		return {
 			outcome = plan.items[1].outcome,
-			reason = plan.items[1].error,
+			availability = plan.items[1].availability,
+			attestation = plan.items[1].attestation,
+			reason = plan.items[1].error or plan.items[1].attestation_reason,
 			probe = resolved,
 			root = root,
 			target = vim.uv.fs_realpath(target),
@@ -216,6 +218,8 @@ describe("Mason real filesystem verification", function()
 		with_pinned_mason(function()
 			local result = run_case("success")
 			assert.equals("completed", result.outcome, result.reason)
+			assert.equals("found", result.availability)
+			assert.equals("full", result.attestation)
 			assert.equals("found", result.probe.status)
 			assert.equals("mason", result.probe.source)
 			assert.equals(result.link, result.probe.path)
@@ -232,7 +236,14 @@ describe("Mason real filesystem verification", function()
 				"corrupt_receipt",
 				"bridge_rejection",
 			}) do
-				assert.equals("installed_unverified", run_case(kind).outcome, kind)
+				local result = run_case(kind)
+				assert.equals("completed", result.outcome, kind)
+				assert.equals("failed", result.attestation, kind)
+				assert.equals(
+					kind == "bridge_rejection" and "not_checked" or (kind == "path_skip" and "missing" or "found"),
+					result.availability,
+					kind
+				)
 			end
 		end)
 	end)

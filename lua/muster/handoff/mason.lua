@@ -3,6 +3,7 @@
 
 local M = {}
 
+local mason_result = require("muster.mason_result")
 local sanitize = require("muster.text").sanitize
 
 local REASON = {
@@ -281,8 +282,8 @@ function M.prepare(result, opts)
 									entries = {},
 									lsp_names = {},
 									install_path = install_path,
-									outcome = "planned",
 								}
+								mason_result.planned(item)
 								grouped[package_name] = item
 								registry_ids[registry_id(identity)] = true
 							end
@@ -366,68 +367,44 @@ local function bridge(runtime, effect)
 	return pcall(runtime.defer, guarded_effect, 0)
 end
 
+-- All terminal labels fit within 400 bytes even when every reason is present.
+local NOTIFICATION_PACKAGE_LIMIT = 64
+local NOTIFICATION_REASON_LIMIT = { error = 80, availability_reason = 56, attestation_reason = 56 }
+
 local function notify(runtime, message, level)
-	pcall(runtime.notify, sanitize(message, 400), level, { title = "muster" })
+	pcall(runtime.notify, message, level, { title = "muster" })
 end
 
 local function notify_start(runtime, item)
 	notify(runtime, ("muster: installing %s via Mason"):format(sanitize(item.package, 120)), vim.log.levels.INFO)
 end
 
-local function failure_effect(runtime, item, detail)
-	return function()
-		notify(
-			runtime,
-			("muster: Mason install %s failed: %s; inspect :MasonLog"):format(
-				sanitize(item.package, 120),
-				sanitize(detail, 200)
-			),
-			vim.log.levels.ERROR
-		)
-	end
-end
-
-local function unknown_effect(runtime, item)
-	return function()
-		notify(
-			runtime,
-			("muster: Mason install %s outcome unknown; inspect :MasonLog"):format(sanitize(item.package, 120)),
-			vim.log.levels.ERROR
-		)
-	end
-end
-
-local function unverified_effect(runtime, item, reason)
-	return function()
-		local message
-		if reason == "Windows wrapper verification is not supported yet" then
-			message = ("muster: Mason installed %s, but Windows wrapper verification is not supported yet"):format(
-				sanitize(item.package, 120)
-			)
-		else
-			message = ("muster: Mason installed %s, but verification failed: %s; inspect :MasonLog"):format(
-				sanitize(item.package, 120),
-				sanitize(reason, 180)
-			)
+local function terminal_message(item, result)
+	local message = ("muster: Mason package %s: outcome=%s availability=%s attestation=%s"):format(
+		sanitize(item.package, NOTIFICATION_PACKAGE_LIMIT),
+		result.outcome,
+		result.availability,
+		result.attestation
+	)
+	for _, field in ipairs({ "error", "availability_reason", "attestation_reason" }) do
+		if result[field] then
+			message = message .. ("; %s=%s"):format(field, sanitize(result[field], NOTIFICATION_REASON_LIMIT[field]))
 		end
-		notify(runtime, message, vim.log.levels.ERROR)
 	end
+	return message
 end
 
-local function success_effect(runtime, item, paths)
-	return function()
-		notify(
-			runtime,
-			("muster: installed %s via Mason: %s"):format(sanitize(item.package, 120), table.concat(paths, ", ")),
-			vim.log.levels.INFO
-		)
-	end
+local function terminal_notify(runtime, item)
+	local result = mason_result.normalize(item)
+	local level = vim.log.levels[mason_result.severity(result):upper()]
+	return bridge(runtime, function()
+		notify(runtime, terminal_message(item, result), level)
+	end)
 end
 
 local function fail_item(runtime, item, detail)
-	item.outcome = "failed"
-	item.error = sanitize(detail, 200)
-	bridge(runtime, failure_effect(runtime, item, detail))
+	mason_result.failed(item, detail)
+	terminal_notify(runtime, item)
 end
 
 local function revalidate(plan, item, registry, opts, installed_expected)
@@ -618,7 +595,7 @@ local function result_value(result)
 	return value
 end
 
-local ATTESTABLE_COMPILERS = {
+local FULL_COMPILERS = {
 	cargo = true,
 	composer = true,
 	gem = true,
@@ -628,20 +605,28 @@ local ATTESTABLE_COMPILERS = {
 	opam = true,
 }
 
+local PARTIAL_COMPILERS = {
+	npm = true,
+	pypi = true,
+	github = true,
+	mason = true,
+	generic = true,
+	openvsx = true,
+}
+
 local function compiler_state(parsed, runtime)
 	if type(parsed.purl) ~= "table" or type(parsed.purl.type) ~= "string" or type(parsed.source) ~= "table" then
 		error("Mason compiler parsed source unavailable")
 	end
 	local source_ok, source = pcall(plain, parsed.source)
 	local fingerprint_ok, fingerprint = pcall(runtime.source_fingerprint)
-	local identity_matches = fingerprint_ok
-		and type(fingerprint) == "string"
-		and fingerprint == runtime.expected_fingerprint
+	local fingerprint_value = fingerprint_ok and type(fingerprint) == "string" and fingerprint or "unavailable"
+	local identity_matches = fingerprint_value == runtime.expected_fingerprint
 	return {
-		fingerprint = fingerprint_ok and fingerprint or "unavailable",
+		fingerprint = fingerprint_value,
 		identity_matches = identity_matches,
 		purl_type = parsed.purl.type,
-		provable = source_ok and identity_matches and ATTESTABLE_COMPILERS[parsed.purl.type] == true,
+		source_representable = source_ok,
 		source = source_ok and source or {},
 	}
 end
@@ -783,17 +768,118 @@ local function handle_closed(handle)
 	end
 end
 
-local function compiler_provenance_matches(item, runtime)
+local function compiler_policy(item, runtime)
 	local captured = item._compiler_state
-	if type(captured) ~= "table" or captured.provable ~= true then
-		return false
+	if
+		type(captured) ~= "table"
+		or captured.identity_matches ~= true
+		or captured.source_representable ~= true
+		or type(captured.purl_type) ~= "string"
+	then
+		return nil
 	end
 	local parsed = result_value(runtime.compiler.parse(item.spec_snapshot, item._effective_install_options))
 	local current = compiler_state(parsed, runtime)
-	return current.provable == true and equal(current, captured)
+	if current.identity_matches ~= true or current.source_representable ~= true or not equal(current, captured) then
+		return nil
+	end
+	if FULL_COMPILERS[current.purl_type] then
+		return "full"
+	end
+	if PARTIAL_COMPILERS[current.purl_type] then
+		return "partial"
+	end
+	return "unsupported"
 end
 
-local function verify_receipt(plan, item, runtime, handle, callback_receipt)
+local PROBE_STATUS = {
+	found = true,
+	missing = true,
+	unverifiable = true,
+	unknown = true,
+	broken = true,
+}
+
+local PROBE_SOURCE = {
+	mason = true,
+	nix = true,
+	mise = true,
+	brew = true,
+	system = true,
+	unknown = true,
+}
+
+local AVAILABILITY_PRIORITY = { "broken", "missing", "unknown", "unverifiable", "found" }
+
+local function availability_reason(status, names)
+	local prefix = ("%s binaries: "):format(status)
+	local limited = {}
+	for index = 1, math.min(#names, 8) do
+		local candidate = vim.list_extend(vim.deepcopy(limited), { sanitize(names[index], 40) })
+		local omitted = #names - #candidate
+		local suffix = omitted > 0 and (" … (+%d more)"):format(omitted) or ""
+		if #(prefix .. table.concat(candidate, ", ") .. suffix) > 200 then
+			break
+		end
+		limited = candidate
+	end
+	local omitted = #names - #limited
+	local suffix = omitted > 0 and (" … (+%d more)"):format(omitted) or ""
+	return prefix .. table.concat(limited, ", ") .. suffix
+end
+
+local function compute_availability(item, runtime)
+	local names = {}
+	local seen = {}
+	for _, binary in ipairs(item.binaries or {}) do
+		if type(binary) == "string" and binary ~= "" and not seen[binary] then
+			seen[binary] = true
+			names[#names + 1] = binary
+		end
+	end
+	table.sort(names)
+	local probes = {}
+	local by_status = {}
+	for _, binary in ipairs(names) do
+		local ok, raw = pcall(runtime.probe, binary)
+		local probe
+		if not ok or type(raw) ~= "table" or not PROBE_STATUS[raw.status] then
+			probe = { status = "broken", reason = "Mason availability probe failed" }
+		elseif raw.status == "found" then
+			local path_ok = pcall(normalize_path, raw.path)
+			local realpath_ok = raw.realpath == nil or type(raw.realpath) == "string"
+			if not PROBE_SOURCE[raw.source] or not path_ok or not realpath_ok then
+				probe = { status = "broken", reason = "Mason availability probe returned malformed evidence" }
+			else
+				probe = { status = "found", source = raw.source, path = raw.path, realpath = raw.realpath }
+			end
+		else
+			probe = { status = raw.status, reason = sanitize(raw.reason or (raw.status .. " binary"), 200) }
+		end
+		probes[binary] = probe
+		by_status[probe.status] = by_status[probe.status] or {}
+		by_status[probe.status][#by_status[probe.status] + 1] = binary
+	end
+	if #names == 0 then
+		return {
+			status = "not_checked",
+			reason = "no Mason binary availability probes ran",
+			probes = probes,
+		}
+	end
+	for _, status in ipairs(AVAILABILITY_PRIORITY) do
+		if by_status[status] then
+			local reason
+			if status ~= "found" then
+				reason = availability_reason(status, by_status[status])
+			end
+			return { status = status, reason = reason, probes = probes }
+		end
+	end
+	return { status = "broken", reason = "Mason availability aggregation failed", probes = probes }
+end
+
+local function verify_receipt(plan, item, runtime, handle, callback_receipt, availability)
 	local live_package = revalidate(plan, item, runtime.registry, runtime.opts, true)
 	handle_closed(handle)
 	local disk = normalize_receipt(disk_receipt(live_package, plan.location))
@@ -828,6 +914,9 @@ local function verify_receipt(plan, item, runtime, handle, callback_receipt)
 		if not safe_relative(relative) then
 			error("Mason receipt contains unsafe bin link")
 		end
+		if runtime.is_windows and relative ~= item.spec_snapshot.bin[binary] then
+			error("Mason Windows receipt target mismatch")
+		end
 		local target = canonical(runtime, normalize_path(item.install_path .. "/" .. relative))
 		if target == package_path or not under(target, package_path) then
 			error("Mason receipt target escaped package directory")
@@ -835,46 +924,67 @@ local function verify_receipt(plan, item, runtime, handle, callback_receipt)
 		targets[binary] = target
 	end
 
-	if runtime.is_windows then
-		return nil, "Windows wrapper verification is not supported yet"
+	local policy = compiler_policy(item, runtime)
+	if not policy or policy == "unsupported" then
+		error("Mason compiler policy or provenance failed")
+	end
+	if availability.status ~= "found" then
+		error("Mason binary availability is degraded")
+	end
+	for _, binary in ipairs(item.binaries) do
+		local probe = availability.probes[binary]
+		if type(probe) ~= "table" or probe.status ~= "found" or probe.source ~= "mason" then
+			error("Mason binary source verification failed")
+		end
+		if runtime.is_windows then
+			local bin = normalize_path(plan.install_root .. "/bin")
+			local path = normalize_path(probe.path)
+			if path == bin or not under(path, bin) then
+				error("Mason Windows binary path escaped Mason bin")
+			end
+		else
+			local expected_link = normalize_path(plan.install_root .. "/bin/" .. binary)
+			if
+				type(probe.realpath) ~= "string"
+				or normalize_path(probe.path) ~= expected_link
+				or canonical(runtime, probe.realpath) ~= targets[binary]
+			then
+				error("Mason binary link or target verification failed")
+			end
+		end
 	end
 
-	local paths = {}
-	for _, binary in ipairs(item.binaries) do
-		local probe = runtime.probe(binary)
-		local expected_link = normalize_path(plan.install_root .. "/bin/" .. binary)
-		if
-			type(probe) ~= "table"
-			or probe.status ~= "found"
-			or probe.source ~= "mason"
-			or type(probe.path) ~= "string"
-			or type(probe.realpath) ~= "string"
-			or normalize_path(probe.path) ~= expected_link
-			or canonical(runtime, probe.realpath) ~= targets[binary]
-		then
-			error("Mason binary link or target verification failed")
+	if runtime.is_windows then
+		if policy ~= "full" then
+			error("Mason Windows attestation has multiple gaps")
 		end
-		paths[#paths + 1] = expected_link
+		return { status = "partial", reason = "Windows wrapper binding is not fully attestable" }
 	end
-	if not compiler_provenance_matches(item, runtime) then
-		return nil, "compiler-derived install inputs are not receipt-verifiable"
+	if policy == "partial" then
+		return { status = "partial", reason = "compiler policy provides partial attestation" }
 	end
-	return paths
+	return { status = "full" }
+end
+
+local function compute_attestation(plan, item, runtime, handle, callback_receipt, availability)
+	if callback_receipt == nil then
+		return { status = "failed", reason = "Mason callback receipt was malformed" }
+	end
+	if runtime.verify then
+		local first, second = runtime.verify(plan, item, runtime, handle, callback_receipt, availability)
+		if type(first) == "table" and first.status then
+			return first
+		end
+		if first ~= nil and availability.status == "found" then
+			return { status = "full" }
+		end
+		return { status = "failed", reason = sanitize(second or "Mason attestation test seam failed", 200) }
+	end
+	return verify_receipt(plan, item, runtime, handle, callback_receipt, availability)
 end
 
 local function blocked(item)
 	return item.deadline_reached == true or item._effects_disabled == true
-end
-
-local function mark_unverified(runtime, item, reason, notify_allowed)
-	if blocked(item) and item.outcome ~= "verifying" then
-		return
-	end
-	item.outcome = "installed_unverified"
-	item.error = sanitize(reason, 200)
-	if notify_allowed ~= false then
-		unverified_effect(runtime, item, reason)()
-	end
 end
 
 ---@param plan muster.MasonPlan
@@ -928,21 +1038,27 @@ function M.execute(plan, opts)
 					if blocked(item) or item.outcome ~= "verifying" then
 						return
 					end
-					local verifier = runtime.verify or verify_receipt
-					local ok_verify, paths, unverified_reason =
-						pcall(verifier, plan, item, runtime, handle, callback_receipt)
+					local ok_availability, availability = pcall(compute_availability, item, runtime)
+					if not ok_availability then
+						availability = {
+							status = "broken",
+							reason = "Mason availability computation failed",
+							probes = {},
+						}
+					end
+					local ok_attestation, attestation =
+						pcall(compute_attestation, plan, item, runtime, handle, callback_receipt, availability)
+					if not ok_attestation or type(attestation) ~= "table" then
+						attestation = { status = "failed", reason = "Mason attestation computation failed" }
+					end
+					if availability.status ~= "found" and attestation.status ~= "failed" then
+						attestation = { status = "failed", reason = "binary availability does not support attestation" }
+					end
 					if blocked(item) or item.outcome ~= "verifying" then
 						return
 					end
-					if not ok_verify then
-						mark_unverified(runtime, item, "post-install receipt or path verification failed")
-					elseif unverified_reason then
-						mark_unverified(runtime, item, unverified_reason)
-					else
-						item.outcome = "completed"
-						item.error = nil
-						success_effect(runtime, item, paths)()
-					end
+					mason_result.completed(item, availability, attestation)
+					terminal_notify(runtime, item)
 				end
 
 				local function settle_callback()
@@ -950,12 +1066,22 @@ function M.execute(plan, opts)
 						return
 					end
 					if callback_success then
+						mason_result.verifying(item)
 						local accepted = bridge(runtime, verification_effect)
 						if not accepted and not blocked(item) and item.outcome == "verifying" then
-							mark_unverified(runtime, item, "post-install safe-context bridge failed", false)
+							mason_result.completed(
+								item,
+								{ status = "not_checked", reason = "safe-context availability computation did not run" },
+								{ status = "failed", reason = "post-install safe-context bridge failed" }
+							)
+							terminal_notify(runtime, item)
 						end
 					else
-						bridge(runtime, failure_effect(runtime, item, callback_error))
+						mason_result.failed(
+							item,
+							("Mason installer callback reported failure: %s"):format(callback_error)
+						)
+						terminal_notify(runtime, item)
 					end
 				end
 
@@ -967,41 +1093,32 @@ function M.execute(plan, opts)
 					callback_success = ok == true
 					if callback_success then
 						local ok_receipt, normalized = pcall(normalize_receipt, value)
-						if ok_receipt then
-							callback_receipt = normalized
-						else
-							callback_receipt = nil
-						end
-						item.outcome = "verifying"
-						item.error = nil
+						callback_receipt = ok_receipt and normalized or nil
 					else
-						callback_error = sanitize(value, 200)
-						item.outcome = "failed"
-						item.error = "Mason installer callback reported failure"
+						callback_error = sanitize(value, 160)
 					end
 					if not invoking then
 						settle_callback()
 					end
 				end
 
-				item.outcome = "dispatched"
+				mason_result.dispatched(item)
 				notify_start(runtime, item)
 				local ok_install, handle_or_error = pcall(package.install, package, install_opts, callback)
 				if ok_install then
 					ok_install, handle_or_error =
 						pcall(swap_install_handle, canonical_package, sentinel, handle_or_error)
 				end
+				if ok_install then
+					handle = handle_or_error
+				end
 				invoking = false
 				if not ok_install then
 					item._effects_disabled = true
-					item.outcome = "unknown"
-					item.error = "Mason install dispatch outcome is ambiguous"
-					bridge(runtime, unknown_effect(runtime, item))
-				else
-					handle = handle_or_error
-					if callback_seen then
-						settle_callback()
-					end
+					mason_result.unknown(item, "Mason install dispatch outcome is ambiguous")
+					terminal_notify(runtime, item)
+				elseif callback_seen then
+					settle_callback()
 				end
 			end
 		end
@@ -1019,14 +1136,16 @@ function M.expire(plan, opts)
 	for _, item in ipairs(plan.items) do
 		if item.outcome == "dispatched" then
 			item.deadline_reached = true
-			item.outcome = "unknown"
-			item.error = "Mason install did not complete before the observation deadline"
-			bridge(runtime, unknown_effect(runtime, item))
+			mason_result.unknown(item, "Mason install did not complete before the observation deadline")
+			terminal_notify(runtime, item)
 		elseif item.outcome == "verifying" then
 			item.deadline_reached = true
-			item.outcome = "installed_unverified"
-			item.error = "post-install verification did not complete before the observation deadline"
-			bridge(runtime, unverified_effect(runtime, item, item.error))
+			mason_result.completed(
+				item,
+				{ status = "not_checked", reason = "availability was not observed before the deadline" },
+				{ status = "failed", reason = "post-install verification did not complete before the deadline" }
+			)
+			terminal_notify(runtime, item)
 		end
 	end
 end

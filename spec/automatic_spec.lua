@@ -1,6 +1,8 @@
 ---@module 'luassert'
 local assert = require("luassert")
 
+local mason_result = require("muster.mason_result")
+
 local function result()
 	return { entries = {}, skipped = {}, bufnr = 1, notes = {} }
 end
@@ -428,9 +430,11 @@ describe("automatic Mason pipeline", function()
 
 	it("expires and gates an overlapping run before dropping its live plan", function()
 		local plans = {
-			{ enabled = true, items = { { package = "old", outcome = "planned" } } },
-			{ enabled = true, items = { { package = "new", outcome = "planned" } } },
+			{ enabled = true, items = { { package = "old" } } },
+			{ enabled = true, items = { { package = "new" } } },
 		}
+		mason_result.planned(plans[1].items[1])
+		mason_result.planned(plans[2].items[1])
 		local prepared = 0
 		local old_callback
 		local automatic, opts = harness()
@@ -439,19 +443,19 @@ describe("automatic Mason pipeline", function()
 			return plans[prepared]
 		end
 		opts.handoff.execute = function(plan)
-			plan.items[1].outcome = "dispatched"
+			mason_result.dispatched(plan.items[1])
 			if plan == plans[1] then
 				old_callback = function()
 					if not plan.items[1].deadline_reached then
-						plan.items[1].outcome = "completed"
+						mason_result.verifying(plan.items[1])
+						mason_result.completed(plan.items[1], { status = "found" }, { status = "full" })
 					end
 				end
 			end
 		end
 		opts.handoff.expire = function(plan)
 			plan.items[1].deadline_reached = true
-			plan.items[1].outcome = "unknown"
-			plan.items[1].error = "Mason install did not complete before the observation deadline"
+			mason_result.unknown(plan.items[1], "Mason install did not complete before the observation deadline")
 		end
 		opts.deadline_timer_factory = function()
 			return { start = function() end, stop = function() end, close = function() end }
@@ -468,10 +472,9 @@ describe("automatic Mason pipeline", function()
 	it("invokes the handoff deadline once and publishes its live terminal transition", function()
 		local deadline
 		local expires = 0
-		local plan = {
-			enabled = true,
-			items = { { package = "tool", outcome = "dispatched" } },
-		}
+		local plan = { enabled = true, items = { { package = "tool" } } }
+		mason_result.planned(plan.items[1])
+		mason_result.dispatched(plan.items[1])
 		local automatic, opts = harness()
 		opts.handoff.prepare = function()
 			return plan
@@ -479,8 +482,7 @@ describe("automatic Mason pipeline", function()
 		opts.handoff.execute = function() end
 		opts.handoff.expire = function(value)
 			expires = expires + 1
-			value.items[1].outcome = "unknown"
-			value.items[1].error = "Mason install did not complete before the observation deadline"
+			mason_result.unknown(value.items[1], "Mason install did not complete before the observation deadline")
 		end
 		opts.deadline_timer_factory = function()
 			return {
@@ -499,6 +501,80 @@ describe("automatic Mason pipeline", function()
 		assert.equals("unknown", automatic.status().mason.items[1].outcome)
 	end)
 
+	it("projects malformed live plan item containers without unbounded iteration or omission", function()
+		local throwing_item = setmetatable({}, {
+			__index = function()
+				error("must not index")
+			end,
+		})
+		for _, raw_items in ipairs({
+			false,
+			{ [2] = false, bad = {} },
+			{ [1000000000] = {} },
+			{ throwing_item },
+			setmetatable({}, {
+				__pairs = function()
+					error("must not iterate")
+				end,
+			}),
+		}) do
+			local plan = { enabled = true, items = raw_items }
+			local automatic, opts = harness()
+			opts.handoff.prepare = function()
+				return plan
+			end
+			opts.handoff.execute = function() end
+			automatic.run(nil, opts)
+			local status = automatic.status()
+			assert.is_table(status.mason)
+			assert.is_true(#status.mason.items >= 1)
+			for _, item in ipairs(status.mason.items) do
+				assert.same({
+					package = "unknown",
+					outcome = "unknown",
+					availability = "not_checked",
+					attestation = "not_checked",
+					error = "malformed Mason status item",
+				}, item)
+			end
+		end
+	end)
+
+	it("fails retained missing items and plan metamethods to one bounded malformed DTO", function()
+		local plans = {
+			{ enabled = true },
+			setmetatable({ enabled = true }, {
+				__index = function()
+					error("must not index retained plan")
+				end,
+			}),
+		}
+		for _, plan in ipairs(plans) do
+			local automatic, opts = harness()
+			opts.handoff.prepare = function()
+				return plan
+			end
+			opts.handoff.execute = function() end
+			automatic.run(nil, opts)
+			local ok, status = pcall(automatic.status)
+			assert.is_true(ok)
+			assert.same({
+				state = "reported",
+				mason = {
+					items = {
+						{
+							package = "unknown",
+							outcome = "unknown",
+							availability = "not_checked",
+							attestation = "not_checked",
+							error = "malformed Mason status item",
+						},
+					},
+				},
+			}, status)
+		end
+	end)
+
 	it("projects malformed Mason outcomes as fixed unknown DTOs", function()
 		local plan = {
 			enabled = true,
@@ -510,19 +586,51 @@ describe("automatic Mason pipeline", function()
 		end
 		opts.handoff.execute = function() end
 		automatic.run(nil, opts)
-		assert.same({
+		local invalid = {
 			package = "tool",
 			outcome = "unknown",
-			reason = "invalid Mason install outcome",
-		}, automatic.status().mason.items[1])
+			availability = "not_checked",
+			attestation = "not_checked",
+			error = "invalid Mason install result",
+		}
+		assert.same(invalid, automatic.status().mason.items[1])
 
 		plan.items[1].outcome = {}
 		plan.items[1].error = "different raw detail"
+		assert.same(invalid, automatic.status().mason.items[1])
+	end)
+
+	it("preserves a legal verified DTO package exactly and fails invalid packages closed", function()
+		local package = string.rep("a", 120) .. ".tool-1"
+		local plan = {
+			enabled = true,
+			items = {
+				{ package = package, outcome = "completed", availability = "found", attestation = "full" },
+			},
+		}
+		local automatic, opts = harness()
+		opts.handoff.prepare = function()
+			return plan
+		end
+		opts.handoff.execute = function() end
+		automatic.run(nil, opts)
 		assert.same({
-			package = "tool",
-			outcome = "unknown",
-			reason = "invalid Mason install outcome",
+			package = package,
+			outcome = "completed",
+			availability = "found",
+			attestation = "full",
 		}, automatic.status().mason.items[1])
+
+		for _, invalid in ipairs({ "", string.rep("a", 129), "bad\npackage", setmetatable({}, {}) }) do
+			plan.items[1].package = invalid
+			assert.same({
+				package = "unknown",
+				outcome = "unknown",
+				availability = "not_checked",
+				attestation = "not_checked",
+				error = "malformed Mason status item",
+			}, automatic.status().mason.items[1])
+		end
 	end)
 
 	it("derives delayed Mason status from the retained live plan without raw fields", function()
@@ -532,7 +640,8 @@ describe("automatic Mason pipeline", function()
 				{
 					package = "tool",
 					outcome = "dispatched",
-					error = nil,
+					availability = "not_checked",
+					attestation = "not_checked",
 					spec_snapshot = { secret = "recipe" },
 					install_path = "/secret/path",
 				},
@@ -546,17 +655,28 @@ describe("automatic Mason pipeline", function()
 		automatic.run(nil, opts)
 
 		local status = automatic.status()
-		assert.same({ package = "tool", outcome = "dispatched" }, status.mason.items[1])
+		assert.same({
+			package = "tool",
+			outcome = "dispatched",
+			availability = "not_checked",
+			attestation = "not_checked",
+		}, status.mason.items[1])
 		assert.is_nil(status.mason.items[1].spec_snapshot)
 		assert.is_nil(status.mason.items[1].install_path)
 
-		plan.items[1].outcome = "installed_unverified"
-		plan.items[1].error = "bridge \226\128\174rejected\n/secret/path"
+		mason_result.verifying(plan.items[1])
+		mason_result.completed(
+			plan.items[1],
+			{ status = "found" },
+			{ status = "failed", reason = "bridge \226\128\174rejected\n/secret/path" }
+		)
 		status = automatic.status()
 		assert.same({
 			package = "tool",
-			outcome = "installed_unverified",
-			reason = "bridge rejected?/secret/path",
+			outcome = "completed",
+			availability = "found",
+			attestation = "failed",
+			attestation_reason = "bridge rejected?/secret/path",
 		}, status.mason.items[1])
 	end)
 end)

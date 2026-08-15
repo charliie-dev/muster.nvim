@@ -45,15 +45,20 @@ local function has(calls, level, needle)
 	end)
 end
 
-describe("Mason outcome severity", function()
-	it("keeps the validity and severity table private", function()
-		local outcome = require("muster.mason_outcome")
-		assert.is_nil(outcome.HEALTH_SEVERITY)
-		outcome.HEALTH_SEVERITY = { corrupt = "info" }
-		assert.same({ "unknown", "invalid Mason install outcome" }, { outcome.normalize("corrupt") })
-		assert.equals("error", outcome.severity("corrupt"))
-		assert.equals("info", outcome.severity("completed"))
-		outcome.HEALTH_SEVERITY = nil
+describe("Mason result severity", function()
+	it("keeps enum and severity state private", function()
+		local result = require("muster.mason_result")
+		local outcomes = result.outcomes()
+		outcomes[1] = "corrupt"
+		assert.equals("planned", result.outcomes()[1])
+		assert.same({
+			outcome = "unknown",
+			availability = "not_checked",
+			attestation = "not_checked",
+			error = "invalid Mason install result",
+		}, result.normalize("corrupt"))
+		assert.equals("error", result.severity("corrupt"))
+		assert.equals("error", result.severity({ outcome = "completed" }))
 	end)
 end)
 
@@ -117,7 +122,23 @@ describe("health.check", function()
 		assert.is_truthy(has(calls, "error", "probe failed safely"))
 	end)
 
-	it("renders delayed installed-unverified Mason outcomes from live automatic status", function()
+	it("renders reported reasons as degraded warnings", function()
+		config.setup({})
+		local saved = package.loaded["muster.automatic"]
+		package.loaded["muster.automatic"] = {
+			status = function()
+				return { state = "reported", reason = "refresh degraded" }
+			end,
+		}
+		local calls = render(function()
+			require("muster.health").check()
+		end)
+		package.loaded["muster.automatic"] = saved
+		assert.is_truthy(has(calls, "warn", "automatic startup run degraded"))
+		assert.is_truthy(has(calls, "warn", "refresh degraded"))
+	end)
+
+	it("renders all dimensions and applies the closed terminal severity matrix", function()
 		config.setup({ mason_install_fallback = true })
 		local saved = package.loaded["muster.automatic"]
 		package.loaded["muster.automatic"] = {
@@ -127,9 +148,18 @@ describe("health.check", function()
 					mason = {
 						items = {
 							{
-								package = "tool",
-								outcome = "installed_unverified",
-								reason = "post-install verification failed",
+								package = "partial",
+								outcome = "completed",
+								availability = "found",
+								attestation = "partial",
+								attestation_reason = "closed compiler gap",
+							},
+							{
+								package = "failed",
+								outcome = "completed",
+								availability = "found",
+								attestation = "failed",
+								attestation_reason = "receipt mismatch",
 							},
 						},
 					},
@@ -140,8 +170,70 @@ describe("health.check", function()
 			require("muster.health").check()
 		end)
 		package.loaded["muster.automatic"] = saved
-		assert.is_truthy(has(calls, "error", "Mason package tool: installed_unverified"))
-		assert.is_truthy(has(calls, "error", "post-install verification failed"))
+		assert.is_truthy(has(calls, "warn", "outcome=completed availability=found attestation=partial"))
+		assert.is_truthy(has(calls, "warn", "closed compiler gap"))
+		assert.is_truthy(has(calls, "error", "outcome=completed availability=found attestation=failed"))
+		assert.is_truthy(has(calls, "error", "receipt mismatch"))
+	end)
+
+	it("renders a verified valid package as INFO and malformed packages as fixed ERROR", function()
+		config.setup({ mason_install_fallback = true })
+		local saved = package.loaded["muster.automatic"]
+		local package_name = string.rep("a", 120) .. ".tool-1"
+		package.loaded["muster.automatic"] = {
+			status = function()
+				return {
+					state = "reported",
+					mason = {
+						items = {
+							{
+								package = package_name,
+								outcome = "completed",
+								availability = "found",
+								attestation = "full",
+							},
+							{ package = "", outcome = "completed", availability = "found", attestation = "full" },
+						},
+					},
+				}
+			end,
+		}
+		local calls = render(function()
+			require("muster.health").check()
+		end)
+		package.loaded["muster.automatic"] = saved
+		assert.is_truthy(has(calls, "info", "outcome=completed availability=found attestation=full"))
+		assert.is_truthy(has(calls, "error", "Mason package unknown: outcome=unknown"))
+		assert.is_truthy(has(calls, "error", "malformed Mason status item"))
+	end)
+
+	it("renders retained-plan malformed DTOs as ERROR", function()
+		config.setup({ mason_install_fallback = true })
+		local saved = package.loaded["muster.automatic"]
+		package.loaded["muster.automatic"] = {
+			status = function()
+				return {
+					state = "reported",
+					mason = {
+						items = {
+							{
+								package = "unknown",
+								outcome = "unknown",
+								availability = "not_checked",
+								attestation = "not_checked",
+								error = "malformed Mason status item",
+							},
+						},
+					},
+				}
+			end,
+		}
+		local calls = render(function()
+			require("muster.health").check()
+		end)
+		package.loaded["muster.automatic"] = saved
+		assert.is_truthy(has(calls, "error", "Mason package unknown: outcome=unknown"))
+		assert.is_truthy(has(calls, "error", "malformed Mason status item"))
 	end)
 
 	it("renders corrupt Mason outcomes as unknown errors", function()
@@ -159,9 +251,60 @@ describe("health.check", function()
 			require("muster.health").check()
 		end)
 		package.loaded["muster.automatic"] = saved
-		assert.is_truthy(has(calls, "error", "Mason package tool: unknown"))
-		assert.is_truthy(has(calls, "error", "invalid Mason install outcome"))
+		assert.is_truthy(has(calls, "error", "Mason package tool: outcome=unknown"))
+		assert.is_truthy(has(calls, "error", "invalid Mason install result"))
 		assert.is_falsy(has(calls, "info", "corrupt"))
+	end)
+
+	it("fails closed when automatic status throws or has malformed top-level and item shapes", function()
+		config.setup({ mason_install_fallback = true })
+		local saved = package.loaded["muster.automatic"]
+		for _, status in ipairs({
+			function()
+				error("status failed")
+			end,
+			function()
+				return "bad"
+			end,
+			function()
+				return { state = "future" }
+			end,
+			function()
+				return { state = "reported", mason = "bad" }
+			end,
+			function()
+				return { state = "failed" }
+			end,
+			function()
+				return { state = "reported", mason = { items = { [2] = false, bad = {} } } }
+			end,
+			function()
+				return { state = "reported", mason = { items = { [1000000000] = {} } } }
+			end,
+			function()
+				return {
+					state = "reported",
+					mason = {
+						items = {
+							setmetatable({}, {
+								__index = function()
+									error("must not index")
+								end,
+							}),
+						},
+					},
+				}
+			end,
+		}) do
+			package.loaded["muster.automatic"] = { status = status }
+			local calls = render(function()
+				require("muster.health").check()
+			end)
+			assert.is_true(vim.iter(calls):any(function(call)
+				return call.level == "error" and call.msg:find("malformed", 1, true) ~= nil
+			end))
+		end
+		package.loaded["muster.automatic"] = saved
 	end)
 
 	it("does not load the automatic module during a read-only health check", function()

@@ -2,6 +2,7 @@
 local assert = require("luassert")
 
 local handoff = require("muster.handoff.mason")
+local mason_result = require("muster.mason_result")
 
 local function with_pinned_mason(callback)
 	local path = assert(vim.env.MUSTER_MASON_NVIM_PATH, "MUSTER_MASON_NVIM_PATH must name the pinned Mason input")
@@ -30,6 +31,12 @@ end
 
 local function result(entries)
 	return { entries = entries or {}, skipped = {}, bufnr = 1, notes = {} }
+end
+
+local function assert_result(item, outcome, availability, attestation)
+	assert.equals(outcome, item.outcome)
+	assert.equals(availability, item.availability)
+	assert.equals(attestation, item.attestation)
 end
 
 local function install_handle(is_closed)
@@ -302,6 +309,14 @@ local function fixture(definitions)
 				callback()
 			end,
 			notify = function() end,
+			probe = function(binary)
+				return {
+					status = "found",
+					source = "mason",
+					path = "/mason/bin/" .. binary,
+					realpath = "/mason/packages/tool/bin/" .. binary,
+				}
+			end,
 			verify = function(_, item)
 				return vim.tbl_map(function(binary)
 					return "/mason/bin/" .. binary
@@ -454,6 +469,14 @@ local function precedence_fixture()
 				callback()
 			end,
 			notify = function() end,
+			probe = function(binary)
+				return {
+					status = "found",
+					source = "mason",
+					path = "/mason/bin/" .. binary,
+					realpath = "/mason/packages/tool/bin/" .. binary,
+				}
+			end,
 			verify = function(_, item)
 				return vim.tbl_map(function(binary)
 					return "/mason/bin/" .. binary
@@ -747,7 +770,7 @@ local function verification_harness(binaries, overrides)
 		defer = overrides.defer,
 		is_windows = overrides.is_windows,
 	})
-	fx.opts.verify = false
+	fx.opts.verify = overrides.verify or false
 	fx.opts.realpath = function(path)
 		local mapped = overrides.realpaths and overrides.realpaths[path]
 		if mapped == false then
@@ -756,6 +779,9 @@ local function verification_harness(binaries, overrides)
 		return mapped or path:gsub("^/mason", "/real/mason")
 	end
 	fx.opts.probe = function(binary)
+		if overrides.probe then
+			return overrides.probe(binary)
+		end
 		local probe = overrides.probes and overrides.probes[binary]
 		if probe then
 			return probe
@@ -1001,7 +1027,7 @@ describe("muster.handoff.mason.execute", function()
 		assert.same({ "failed", "completed" }, { plan.items[1].outcome, plan.items[2].outcome })
 		assert.equals(3, #messages)
 		assert.is_truthy(messages[1]:find("bad", 1, true))
-		assert.is_truthy(messages[1]:find(":MasonLog", 1, true))
+		assert.is_truthy(messages[1]:find("outcome=failed availability=not_checked attestation=not_checked", 1, true))
 		for _, message in ipairs(messages) do
 			assert.is_falsy(message:find("[%z\1-\31\127]"))
 			assert.is_true(#message <= 400)
@@ -1250,7 +1276,7 @@ describe("muster.handoff.mason.execute", function()
 		assert.equals("dispatched", plan.items[3].outcome)
 	end)
 
-	it("settles duplicate callbacks once and retries sorted captured LSP names", function()
+	it("settles duplicate callbacks once and never enables captured LSP names", function()
 		local enabled = {}
 		local plan, fx = prepare_batch({
 			tool = {
@@ -1307,7 +1333,7 @@ describe("muster.handoff.mason.execute", function()
 			assert.same({}, enabled)
 			assert.equals(4, #notifications)
 			assert.is_true(vim.iter(notifications):any(function(message)
-				return message:find("outcome unknown; inspect :MasonLog", 1, true) ~= nil
+				return message:find("outcome=unknown availability=not_checked attestation=not_checked", 1, true) ~= nil
 			end))
 		end
 	end)
@@ -1416,7 +1442,12 @@ describe("muster.handoff.mason.execute", function()
 				end,
 			})
 			handoff.execute(plan, fx.opts)
-			assert.equals(callback_result[1] and "installed_unverified" or "failed", plan.items[1].outcome)
+			if callback_result[1] then
+				assert_result(plan.items[1], "completed", "not_checked", "failed")
+				assert.equals("post-install safe-context bridge failed", plan.items[1].attestation_reason)
+			else
+				assert_result(plan.items[1], "failed", "not_checked", "not_checked")
+			end
 			assert.equals(1, effects)
 		end
 	end)
@@ -1740,7 +1771,8 @@ describe("muster.handoff.mason receipt and path verification", function()
 				end
 				closed = true
 				held_callback(true, callback_receipt)
-				assert.equals("installed_unverified", plan.items[1].outcome)
+				assert_result(plan.items[1], "completed", "found", "failed")
+				assert.is_truthy(plan.items[1].attestation_reason)
 			end)
 			settings.current.npm.install_args = original_args
 			assert.is_true(ok, err)
@@ -1757,10 +1789,73 @@ describe("muster.handoff.mason receipt and path verification", function()
 		}, harness.notifications[1])
 
 		harness.complete()
-		assert.equals("completed", harness.item.outcome, harness.item.error)
+		assert_result(harness.item, "completed", "found", "full")
 		assert.equals(2, #harness.notifications)
 		assert.equals(vim.log.levels.INFO, harness.notifications[2].level)
-		assert.equals("muster: installed tool via Mason: /mason/bin/tool", harness.notifications[2].message)
+		assert.equals(
+			"muster: Mason package tool: outcome=completed availability=found attestation=full",
+			harness.notifications[2].message
+		)
+	end)
+
+	it("emits exactly one bounded terminal notification with all dimensions for every computed tuple", function()
+		local cases = {
+			{ "found", { status = "full" }, vim.log.levels.INFO },
+			{ "found", { status = "partial", reason = "closed gap" }, vim.log.levels.WARN },
+			{ "found", { status = "failed", reason = "failed proof" }, vim.log.levels.ERROR },
+			{ "missing", { status = "failed", reason = "failed proof" }, vim.log.levels.ERROR },
+			{ "unknown", { status = "failed", reason = "failed proof" }, vim.log.levels.ERROR },
+			{ "broken", { status = "failed", reason = "failed proof" }, vim.log.levels.ERROR },
+			{ "unverifiable", { status = "failed", reason = "failed proof" }, vim.log.levels.ERROR },
+		}
+		for _, case in ipairs(cases) do
+			local status, attestation, level = unpack(case)
+			local probe = status == "found"
+					and {
+						status = "found",
+						source = "mason",
+						path = "/mason/bin/tool",
+						realpath = "/real/mason/packages/tool/bin/tool",
+					}
+				or { status = status, reason = status .. " fixture" }
+			local harness = verification_harness({ tool = "bin/tool" }, {
+				probes = { tool = probe },
+				verify = function()
+					return vim.deepcopy(attestation)
+				end,
+			})
+			harness.complete()
+			assert.equals(2, #harness.notifications, status)
+			assert.equals(level, harness.notifications[2].level, status)
+			assert.is_truthy(harness.notifications[2].message:find("outcome=completed", 1, true))
+			assert.is_truthy(harness.notifications[2].message:find("availability=" .. status, 1, true))
+			assert.is_truthy(harness.notifications[2].message:find("attestation=" .. harness.item.attestation, 1, true))
+			assert.is_true(#harness.notifications[2].message <= 400)
+		end
+	end)
+
+	it("structurally budgets maximum package and dual reasons without dropping labels", function()
+		local binaries = {}
+		local probes = {}
+		for index = 1, 12 do
+			local binary = ("binary-%02d-%s"):format(index, string.rep("x", 30))
+			binaries[binary] = "bin/" .. binary
+			probes[binary] = { status = "broken", reason = string.rep("availability", 30) }
+		end
+		local harness = verification_harness(binaries, {
+			probes = probes,
+			verify = function()
+				return { status = "failed", reason = string.rep("attestation", 30) }
+			end,
+		})
+		harness.item.package = string.rep("p", 128)
+		harness.complete()
+		local message = harness.notifications[2].message
+		assert.is_true(#message <= 400)
+		assert.is_truthy(message:find("Mason package ", 1, true))
+		assert.is_truthy(message:find("outcome=completed availability=broken attestation=failed", 1, true))
+		assert.is_truthy(message:find("availability_reason=", 1, true))
+		assert.is_truthy(message:find("attestation_reason=", 1, true))
 	end)
 
 	it("normalizes the callback receipt synchronously before scheduled verification", function()
@@ -1777,8 +1872,8 @@ describe("muster.handoff.mason receipt and path verification", function()
 		assert.equals("completed", harness.item.outcome)
 	end)
 
-	it("never attests generic or openvsx across an adversarial platform-selection interval", function()
-		for _, purl_type in ipairs({ "generic", "openvsx" }) do
+	it("partially attests closed compiler gaps only when captured state remains stable", function()
+		for _, purl_type in ipairs({ "npm", "pypi", "github", "mason", "generic", "openvsx" }) do
 			local selected = { value = "platform-a" }
 			local compiler = mutable_compiler_fixture(purl_type, selected)
 			local harness = verification_harness({ tool = "bin/tool" }, { compiler = compiler })
@@ -1787,7 +1882,28 @@ describe("muster.handoff.mason receipt and path verification", function()
 			assert.equals("platform-b", actual.source.selected)
 			selected.value = "platform-a"
 			harness.complete()
-			assert.equals("installed_unverified", harness.item.outcome, purl_type)
+			assert_result(harness.item, "completed", "found", "partial")
+			assert.equals(vim.log.levels.WARN, harness.notifications[2].level, purl_type)
+		end
+	end)
+
+	it("fully attests only the closed full compiler set with exact found Mason proofs", function()
+		for _, purl_type in ipairs({ "cargo", "composer", "gem", "golang", "luarocks", "nuget", "opam" }) do
+			local harness = verification_harness({ tool = "bin/tool" }, {
+				compiler = mutable_compiler_fixture(purl_type, { value = "stable" }),
+			})
+			harness.complete()
+			assert_result(harness.item, "completed", "found", "full")
+		end
+	end)
+
+	it("fails attestation for unknown and future compiler types", function()
+		for _, purl_type in ipairs({ "unknown", "future-installer" }) do
+			local harness = verification_harness({ tool = "bin/tool" }, {
+				compiler = mutable_compiler_fixture(purl_type, { value = "stable" }),
+			})
+			harness.complete()
+			assert_result(harness.item, "completed", "found", "failed")
 		end
 	end)
 
@@ -1797,6 +1913,9 @@ describe("muster.handoff.mason receipt and path verification", function()
 				return string.rep("0", 64)
 			end,
 			function()
+				return 7
+			end,
+			function()
 				error("source root unreadable")
 			end,
 		}) do
@@ -1804,7 +1923,8 @@ describe("muster.handoff.mason receipt and path verification", function()
 				_source_fingerprint = fingerprint,
 			})
 			harness.complete()
-			assert.equals("installed_unverified", harness.item.outcome)
+			assert_result(harness.item, "completed", "found", "failed")
+			assert.equals("string", type(harness.item._compiler_state.fingerprint))
 		end
 	end)
 
@@ -1820,8 +1940,118 @@ describe("muster.handoff.mason receipt and path verification", function()
 			},
 		})
 		harness.complete()
-		assert.equals("installed_unverified", harness.item.outcome)
+		assert_result(harness.item, "completed", "found", "failed")
 		assert.equals(vim.log.levels.ERROR, harness.notifications[2].level)
+	end)
+
+	it("isolates availability and attestation exceptions while continuing every binary probe", function()
+		local probed = {}
+		local attested = 0
+		local availability_failure = verification_harness({ alpha = "bin/alpha", beta = "bin/beta" }, {
+			probe = function(binary)
+				probed[#probed + 1] = binary
+				if binary == "alpha" then
+					error("probe failed")
+				end
+				return {
+					status = "found",
+					source = "mason",
+					path = "/mason/bin/" .. binary,
+					realpath = "/real/mason/packages/tool/bin/" .. binary,
+				}
+			end,
+			verify = function()
+				attested = attested + 1
+				return { status = "failed", reason = "attestation still ran" }
+			end,
+		})
+		availability_failure.complete()
+		assert.same({ "alpha", "beta" }, probed)
+		assert.equals(1, attested)
+		assert_result(availability_failure.item, "completed", "broken", "failed")
+
+		local attestation_failure = verification_harness({ tool = "bin/tool" }, {
+			verify = function()
+				error("attestation failed")
+			end,
+		})
+		attestation_failure.complete()
+		assert_result(attestation_failure.item, "completed", "found", "failed")
+		assert.equals("Mason attestation computation failed", attestation_failure.item.attestation_reason)
+	end)
+
+	it("aggregates mixed multi-binary availability by priority without laundering shadows", function()
+		local harness = verification_harness({
+			alpha = "bin/alpha",
+			beta = "bin/beta",
+			broken = "bin/broken",
+			missing = "bin/missing",
+			shadow = "bin/shadow",
+		}, {
+			probes = {
+				broken = { status = "broken", reason = "probe broke" },
+				missing = { status = "missing" },
+				shadow = {
+					status = "found",
+					source = "system",
+					path = "/usr/bin/shadow",
+					realpath = "/usr/bin/shadow",
+				},
+			},
+		})
+		harness.complete()
+		assert_result(harness.item, "completed", "broken", "failed")
+		assert.is_truthy(harness.item.availability_reason:find("broken", 1, true))
+	end)
+
+	it("applies the closed multi-binary availability priority order", function()
+		local cases = {
+			{ "broken", { "found", "unverifiable", "unknown", "missing", "broken" } },
+			{ "missing", { "found", "unverifiable", "unknown", "missing" } },
+			{ "unknown", { "found", "unverifiable", "unknown" } },
+			{ "unverifiable", { "found", "unverifiable" } },
+			{ "found", { "found", "found" } },
+		}
+		for _, case in ipairs(cases) do
+			local expected, statuses = unpack(case)
+			local binaries = {}
+			local probes = {}
+			for index, status in ipairs(statuses) do
+				local binary = "tool-" .. index
+				binaries[binary] = "bin/" .. binary
+				probes[binary] = status == "found"
+						and {
+							status = "found",
+							source = "mason",
+							path = "/mason/bin/" .. binary,
+							realpath = "/real/mason/packages/tool/bin/" .. binary,
+						}
+					or { status = status, reason = status }
+			end
+			local harness = verification_harness(binaries, {
+				probes = probes,
+				verify = function()
+					return { status = "failed", reason = "fixture" }
+				end,
+			})
+			harness.complete()
+			assert.equals(expected, harness.item.availability)
+		end
+	end)
+
+	it("bounds and sorts aggregate availability names", function()
+		local binaries = {}
+		local probes = {}
+		for index = 1, 12 do
+			local name = ("binary-%02d-%s"):format(index, string.rep("x", 30))
+			binaries[name] = "bin/" .. name
+			probes[name] = { status = "broken", reason = "broken" }
+		end
+		local harness = verification_harness(binaries, { probes = probes })
+		harness.complete()
+		assert_result(harness.item, "completed", "broken", "failed")
+		assert.is_true(#harness.item.availability_reason <= 200)
+		assert.is_truthy(harness.item.availability_reason:find("more)", 1, true))
 	end)
 
 	it("rejects an exact Mason link that resolves to a different package target", function()
@@ -1836,14 +2066,14 @@ describe("muster.handoff.mason receipt and path verification", function()
 			},
 		})
 		harness.complete()
-		assert.equals("installed_unverified", harness.item.outcome)
+		assert_result(harness.item, "completed", "found", "failed")
 	end)
 
 	it("rejects unsafe receipt targets and canonical package prefix collisions", function()
 		for _, target in ipairs({ ".", "/outside/tool", "../outside/tool", "bin/../../outside/tool", "C:/outside/tool" }) do
 			local harness = verification_harness({ tool = target })
 			harness.complete()
-			assert.equals("installed_unverified", harness.item.outcome, target)
+			assert_result(harness.item, "completed", "found", "failed")
 		end
 
 		local harness = verification_harness({ tool = "bin/tool" }, {
@@ -1852,7 +2082,7 @@ describe("muster.handoff.mason receipt and path verification", function()
 			},
 		})
 		harness.complete()
-		assert.equals("installed_unverified", harness.item.outcome)
+		assert_result(harness.item, "completed", "found", "failed")
 	end)
 
 	it("rejects callback/disk, registry, source, option, schema, and link mismatches", function()
@@ -1881,24 +2111,69 @@ describe("muster.handoff.mason receipt and path verification", function()
 				harness.data.links.bin = {}
 			end,
 		}
-		for index, mutate in ipairs(mutations) do
+		for _, mutate in ipairs(mutations) do
 			local harness = verification_harness({ tool = "bin/tool" })
 			mutate(harness)
 			harness.complete(receipt_fixture(vim.deepcopy(harness.data)))
-			assert.equals("installed_unverified", harness.item.outcome, index)
+			assert_result(harness.item, "completed", "found", "failed")
 		end
 	end)
 
-	it("keeps Windows success installed-unverified after validating the schema-2 .cmd receipt key", function()
+	it("allows the single closed Windows wrapper gap only after every other proof passes", function()
 		local harness = verification_harness({ tool = "bin/tool.exe" }, { is_windows = true })
 		assert.is_truthy(harness.data.links.bin["tool.cmd"])
 		harness.complete()
-		assert.equals("installed_unverified", harness.item.outcome)
+		assert_result(harness.item, "completed", "found", "partial")
 		assert.equals(
-			"muster: Mason installed tool, but Windows wrapper verification is not supported yet",
+			"muster: Mason package tool: outcome=completed availability=found attestation=partial; attestation_reason=Windows wrapper binding is not fully attestable",
 			harness.notifications[2].message
 		)
-		assert.equals(vim.log.levels.ERROR, harness.notifications[2].level)
+		assert.equals(vim.log.levels.WARN, harness.notifications[2].level)
+	end)
+
+	it("fails Windows attestation for shadows, malformed evidence, negative .cmd cases, and combined gaps", function()
+		for _, probe in ipairs({
+			{ status = "found", source = "system", path = "C:/system/tool.cmd", realpath = "C:/system/tool.cmd" },
+			{ status = "found", source = "unknown", path = "/mason/bin/tool.cmd", realpath = "/target/tool" },
+			{ status = "found", source = "mason", path = "C:/outside/tool.cmd", realpath = "C:/outside/tool.cmd" },
+			{ status = "found", source = "mason", path = "bad\npath", realpath = "/target/tool" },
+		}) do
+			local harness = verification_harness({ tool = "bin/tool.exe" }, {
+				is_windows = true,
+				probes = { tool = probe },
+			})
+			harness.complete()
+			assert_result(harness.item, "completed", probe.path == "bad\npath" and "broken" or "found", "failed")
+		end
+
+		for _, mutate in ipairs({
+			function(harness)
+				harness.data.links.bin = {}
+				harness.disk_data.links.bin = {}
+			end,
+			function(harness)
+				harness.data.links.bin = { ["Tool.cmd"] = "bin/tool.exe" }
+				harness.disk_data.links.bin = { ["Tool.cmd"] = "bin/tool.exe" }
+			end,
+			function(harness)
+				harness.data.links.bin["tool.cmd"] = "bin/other.exe"
+				harness.disk_data.links.bin["tool.cmd"] = "bin/other.exe"
+			end,
+		}) do
+			local harness = verification_harness({ tool = "bin/tool.exe" }, { is_windows = true })
+			mutate(harness)
+			harness.complete(receipt_fixture(vim.deepcopy(harness.data)))
+			assert_result(harness.item, "completed", "found", "failed")
+		end
+
+		for _, purl_type in ipairs({ "npm", "future-installer" }) do
+			local harness = verification_harness({ tool = "bin/tool.exe" }, {
+				is_windows = true,
+				compiler = mutable_compiler_fixture(purl_type, { value = "stable" }),
+			})
+			harness.complete()
+			assert_result(harness.item, "completed", "found", "failed")
+		end
 	end)
 
 	it("emits exact callback-failure and unknown lifecycle errors independently of summary settings", function()
@@ -1912,14 +2187,14 @@ describe("muster.handoff.mason receipt and path verification", function()
 					return install_handle()
 				end,
 				outcome = "failed",
-				message = "muster: Mason install tool failed: installer rejected; inspect :MasonLog",
+				error = "Mason installer callback reported failure: installer rejected",
 			},
 			{
 				install = function()
 					return "invalid handle"
 				end,
 				outcome = "unknown",
-				message = "muster: Mason install tool outcome unknown; inspect :MasonLog",
+				error = "Mason install dispatch outcome is ambiguous",
 			},
 		}) do
 			local notifications = {}
@@ -1937,7 +2212,13 @@ describe("muster.handoff.mason receipt and path verification", function()
 			assert.equals(2, #notifications)
 			assert.equals(vim.log.levels.INFO, notifications[1].level)
 			assert.equals(vim.log.levels.ERROR, notifications[2].level)
-			assert.equals(case.message, notifications[2].message)
+			assert.equals(
+				("muster: Mason package tool: outcome=%s availability=not_checked attestation=not_checked; error=%s"):format(
+					case.outcome,
+					case.error
+				),
+				notifications[2].message
+			)
 			assert.same({ title = "muster" }, notifications[2].opts)
 		end
 		config_mod.reset()
@@ -2005,7 +2286,8 @@ describe("muster.handoff.mason verified lifecycle contract", function()
 		callback_receipt.marker = "after"
 		assert.is_function(scheduled)
 		scheduled()
-		assert.equals("installed_unverified", plan.items[1].outcome)
+		assert_result(plan.items[1], "completed", "found", "failed")
+		assert.equals("Mason callback receipt was malformed", plan.items[1].attestation_reason)
 	end)
 
 	it("never enables LSP directly after a successful callback", function()
@@ -2026,14 +2308,14 @@ describe("muster.handoff.mason verified lifecycle contract", function()
 		assert.equals(0, enabled)
 	end)
 
-	it("fails closed on Windows callback success", function()
+	it("fails closed on malformed Windows callback receipt before an injected attestation seam", function()
 		local plan, fx = prepare_batch(
 			{ tool = { bins = { tool = "bin/tool" } } },
 			{ entry("a", "tool", "tool", "tool") },
 			{
 				is_windows = true,
 				verify = function()
-					return nil, "Windows wrapper verification is not supported yet"
+					return { status = "failed", reason = "Windows attestation fixture rejected" }
 				end,
 				schedule = function(callback)
 					callback()
@@ -2041,8 +2323,30 @@ describe("muster.handoff.mason verified lifecycle contract", function()
 			}
 		)
 		handoff.execute(plan, fx.opts)
-		assert.equals("installed_unverified", plan.items[1].outcome)
-		assert.is_truthy(plan.items[1].error:find("Windows wrapper verification", 1, true))
+		assert_result(plan.items[1], "completed", "found", "failed")
+		assert.equals("Mason callback receipt was malformed", plan.items[1].attestation_reason)
+	end)
+
+	it("maps a verifying deadline to completed not-checked failed before one ERROR notification", function()
+		local item = { package = "tool" }
+		mason_result.planned(item)
+		mason_result.dispatched(item)
+		mason_result.verifying(item)
+		local notifications = {}
+		handoff.expire({ items = { item } }, {
+			schedule = function(callback)
+				callback()
+			end,
+			notify = function(message, level)
+				notifications[#notifications + 1] = { message = message, level = level }
+			end,
+		})
+		assert_result(item, "completed", "not_checked", "failed")
+		assert.equals(1, #notifications)
+		assert.equals(vim.log.levels.ERROR, notifications[1].level)
+		assert.is_truthy(
+			notifications[1].message:find("outcome=completed availability=not_checked attestation=failed", 1, true)
+		)
 	end)
 
 	it("expires dispatched and verifying items once and permanently gates late work", function()
@@ -2074,7 +2378,8 @@ describe("muster.handoff.mason verified lifecycle contract", function()
 		assert.same({ "verifying", "dispatched" }, { plan.items[1].outcome, plan.items[2].outcome })
 
 		handoff.expire(plan, fx.opts)
-		assert.same({ "installed_unverified", "unknown" }, { plan.items[1].outcome, plan.items[2].outcome })
+		assert.same({ "completed", "unknown" }, { plan.items[1].outcome, plan.items[2].outcome })
+		assert_result(plan.items[1], "completed", "not_checked", "failed")
 		for index = 2, #effects do
 			effects[index]()
 		end
@@ -2082,7 +2387,8 @@ describe("muster.handoff.mason verified lifecycle contract", function()
 		callback(true, {})
 		effects[1]()
 		handoff.expire(plan, fx.opts)
-		assert.same({ "installed_unverified", "unknown" }, { plan.items[1].outcome, plan.items[2].outcome })
+		assert.same({ "completed", "unknown" }, { plan.items[1].outcome, plan.items[2].outcome })
+		assert_result(plan.items[1], "completed", "not_checked", "failed")
 		assert.equals(notice_count, #notices)
 	end)
 end)

@@ -87,26 +87,121 @@
 ---| '"dispatched"'
 ---| '"verifying"'
 ---| '"completed"'
----| '"installed_unverified"'
 ---| '"failed"'
 ---| '"unknown"'
 
----@class muster.AutomaticMasonItemStatus
----@field package string
----@field outcome muster.MasonInstallOutcome
+---@alias muster.MasonAvailability
+---| '"not_checked"'
+---| '"found"'
+---| '"missing"'
+---| '"unverifiable"'
+---| '"unknown"'
+---| '"broken"'
+
+---@alias muster.MasonAttestation '"not_checked"'|'"full"'|'"partial"'|'"failed"'
+
+---@class (exact) muster.MasonNonterminalResult
+---@field outcome '"planned"'|'"dispatched"'|'"verifying"'
+---@field availability '"not_checked"'
+---@field attestation '"not_checked"'
+
+---@class (exact) muster.MasonOperationFailureResult
+---@field outcome '"failed"'|'"unknown"'
+---@field availability '"not_checked"'
+---@field attestation '"not_checked"'
+---@field error string
+
+---@class (exact) muster.MasonVerifiedResult
+---@field outcome '"completed"'
+---@field availability '"found"'
+---@field attestation '"full"'
+
+---@class (exact) muster.MasonPartialResult
+---@field outcome '"completed"'
+---@field availability '"found"'
+---@field attestation '"partial"'
+---@field attestation_reason string
+
+---@class (exact) muster.MasonFoundAttestationFailedResult
+---@field outcome '"completed"'
+---@field availability '"found"'
+---@field attestation '"failed"'
+---@field attestation_reason string
+
+---@class (exact) muster.MasonUnavailableAttestationFailedResult
+---@field outcome '"completed"'
+---@field availability '"not_checked"'|'"missing"'|'"unverifiable"'|'"unknown"'|'"broken"'
+---@field attestation '"failed"'
+---@field availability_reason string
+---@field attestation_reason string
+
+---@alias muster.MasonInstallResult muster.MasonNonterminalResult|muster.MasonOperationFailureResult|muster.MasonVerifiedResult|muster.MasonPartialResult|muster.MasonFoundAttestationFailedResult|muster.MasonUnavailableAttestationFailedResult
+
+---@class muster.MasonAvailabilityEvidence
+---@field status muster.MasonAvailability
 ---@field reason? string
+
+---@class muster.MasonAttestationEvidence
+---@field status muster.MasonAttestation
+---@field reason? string
+
+---@class (exact) muster.AutomaticMasonNonterminalStatus: muster.MasonNonterminalResult
+---@field package string
+
+---@class (exact) muster.AutomaticMasonOperationFailureStatus: muster.MasonOperationFailureResult
+---@field package string
+
+---@class (exact) muster.AutomaticMasonVerifiedStatus: muster.MasonVerifiedResult
+---@field package string
+
+---@class (exact) muster.AutomaticMasonPartialStatus: muster.MasonPartialResult
+---@field package string
+
+---@class (exact) muster.AutomaticMasonFoundAttestationFailedStatus: muster.MasonFoundAttestationFailedResult
+---@field package string
+
+---@class (exact) muster.AutomaticMasonUnavailableAttestationFailedStatus: muster.MasonUnavailableAttestationFailedResult
+---@field package string
+
+---@alias muster.AutomaticMasonItemStatus muster.AutomaticMasonNonterminalStatus|muster.AutomaticMasonOperationFailureStatus|muster.AutomaticMasonVerifiedStatus|muster.AutomaticMasonPartialStatus|muster.AutomaticMasonFoundAttestationFailedStatus|muster.AutomaticMasonUnavailableAttestationFailedStatus
 
 ---@class muster.AutomaticMasonStatus
 ---@field items muster.AutomaticMasonItemStatus[]
 
 ---@alias muster.AutomaticState '"idle"'|'"running"'|'"reported"'|'"failed"'|'"bridge_failed"'
 
----@class muster.AutomaticStatus
----@field state muster.AutomaticState
----@field reason? string
+---@class muster.AutomaticStatusBase
 ---@field mason? muster.AutomaticMasonStatus
 
----@class muster.MasonInstallItem
+---@class muster.AutomaticIdleStatus: muster.AutomaticStatusBase
+---@field state '"idle"'
+
+---@class muster.AutomaticRunningStatus: muster.AutomaticStatusBase
+---@field state '"running"'
+
+---@class muster.AutomaticReportedStatus: muster.AutomaticStatusBase
+---@field state '"reported"'
+---@field reason? string Degraded completion reason.
+
+---@class muster.AutomaticFailedStatus: muster.AutomaticStatusBase
+---@field state '"failed"'
+---@field reason string
+
+---@class muster.AutomaticBridgeFailedStatus: muster.AutomaticStatusBase
+---@field state '"bridge_failed"'
+---@field reason string
+
+---@alias muster.AutomaticStatus muster.AutomaticIdleStatus|muster.AutomaticRunningStatus|muster.AutomaticReportedStatus|muster.AutomaticFailedStatus|muster.AutomaticBridgeFailedStatus
+
+---@class muster.MasonInstallState
+---@field outcome? muster.MasonInstallOutcome
+---@field availability? muster.MasonAvailability
+---@field attestation? muster.MasonAttestation
+---@field error? string
+---@field availability_reason? string
+---@field attestation_reason? string
+
+---@class muster.MasonInstallItem: muster.MasonInstallState
 ---@field package string
 ---@field binaries string[]
 ---@field registry_identity table
@@ -114,14 +209,12 @@
 ---@field entries muster.Entry[]
 ---@field lsp_names string[]
 ---@field install_path string
----@field outcome muster.MasonInstallOutcome
----@field error? string
 ---@field deadline_reached? boolean
 ---@field _effects_disabled? boolean
 ---@field _expected_source? table
 ---@field _install_options? table
 ---@field _effective_install_options? table
----@field _compiler_state? { fingerprint: string, identity_matches: boolean, purl_type: string, provable: boolean, source: table }
+---@field _compiler_state? { fingerprint: string, identity_matches: boolean, purl_type: string, source_representable: boolean, source: table }
 
 ---@class muster.MasonPlan
 ---@field enabled boolean
