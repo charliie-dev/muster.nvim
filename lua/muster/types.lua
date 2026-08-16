@@ -33,9 +33,220 @@
 ---@field command string
 ---@alias muster.NvimLintEntry string|muster.NvimLintDeclaration
 
+---@alias muster.UiBorderPart string|[string, string]
+---@alias muster.UiBorder string|muster.UiBorderPart[]
+---@alias muster.UiKeymap string|string[]|false
+
+---@class (exact) muster.UiIcons
+---@field found string
+---@field missing string
+---@field unknown string
+---@field broken string
+---@field unverifiable string
+---@field pending string
+---@field discovered string
+---@field expanded string
+---@field collapsed string
+
+---@class (exact) muster.UiKeymaps
+---@field close muster.UiKeymap
+---@field active muster.UiKeymap
+---@field all muster.UiKeymap
+---@field issues muster.UiKeymap
+---@field next_tab muster.UiKeymap
+---@field previous_tab muster.UiKeymap
+---@field details muster.UiKeymap
+---@field search muster.UiKeymap
+---@field help muster.UiKeymap
+---@field refresh muster.UiKeymap
+---@field copy_path muster.UiKeymap
+
+---@class (exact) muster.UiTabs
+---@field active string
+---@field all string
+---@field issues string
+
+---@class muster.UiAdapterLabels
+---@field [string] string
+
+---@class (exact) muster.UiColumns
+---@field status string
+---@field tool string
+---@field adapter string
+---@field version string
+
+---@class (exact) muster.UiDetails
+---@field source string
+---@field executable string
+---@field path string
+---@field realpath string
+---@field reason string
+---@field advice string
+
+---@class (exact) muster.UiLabels
+---@field title string
+---@field tabs muster.UiTabs
+---@field adapters muster.UiAdapterLabels
+---@field columns muster.UiColumns
+---@field details muster.UiDetails
+---@field empty string
+---@field no_matches string
+---@field no_issues string
+---@field search_prompt string
+---@field help string
+
+---@class (exact) muster.UiIconsOpts
+---@field found? string
+---@field missing? string
+---@field unknown? string
+---@field broken? string
+---@field unverifiable? string
+---@field pending? string
+---@field discovered? string
+---@field expanded? string
+---@field collapsed? string
+
+---@class (exact) muster.UiKeymapsOpts
+---@field close? muster.UiKeymap
+---@field active? muster.UiKeymap
+---@field all? muster.UiKeymap
+---@field issues? muster.UiKeymap
+---@field next_tab? muster.UiKeymap
+---@field previous_tab? muster.UiKeymap
+---@field details? muster.UiKeymap
+---@field search? muster.UiKeymap
+---@field help? muster.UiKeymap
+---@field refresh? muster.UiKeymap
+---@field copy_path? muster.UiKeymap
+
+---@class (exact) muster.UiTabsOpts
+---@field active? string
+---@field all? string
+---@field issues? string
+
+---@class (exact) muster.UiColumnsOpts
+---@field status? string
+---@field tool? string
+---@field adapter? string
+---@field version? string
+
+---@class (exact) muster.UiDetailsOpts
+---@field source? string
+---@field executable? string
+---@field path? string
+---@field realpath? string
+---@field reason? string
+---@field advice? string
+
+---@class (exact) muster.UiLabelsOpts
+---@field title? string
+---@field tabs? muster.UiTabsOpts
+---@field adapters? muster.UiAdapterLabels
+---@field columns? muster.UiColumnsOpts
+---@field details? muster.UiDetailsOpts
+---@field empty? string
+---@field no_matches? string
+---@field no_issues? string
+---@field search_prompt? string
+---@field help? string
+
+---@class (exact) muster.UiOpts
+---@field width? number
+---@field height? number
+---@field border? muster.UiBorder
+---@field backdrop? integer
+---@field icons? muster.UiIconsOpts
+---@field labels? muster.UiLabelsOpts
+---@field keymaps? muster.UiKeymapsOpts
+
+---@class (exact) muster.UiConfig
+---@field width number
+---@field height number
+---@field border muster.UiBorder
+---@field backdrop integer
+---@field icons muster.UiIcons
+---@field labels muster.UiLabels
+---@field keymaps muster.UiKeymaps
+
+---@alias muster.UiTab '"active"'|'"all"'|'"issues"'
+
+---@class muster.UiRenderState
+---@field view muster.OverlayView
+---@field ui muster.UiConfig
+---@field tab muster.UiTab
+---@field query string
+---@field showing_help boolean
+---@field expanded_key? string
+---@field versions table<string, muster.Version>
+---@field source_error? string
+---@field revision integer
+
+---@class muster.UiExtmark
+---@field line integer 0-based line
+---@field col integer 0-based byte column
+---@field opts vim.api.keyset.set_extmark
+
+---@class muster.UiVirtualText
+---@field line integer 0-based line
+---@field chunks [string, string][]
+---@field pos? "eol"|"right_align"
+
+---@class muster.UiRow
+---@field kind "entry"|"diagnostic"|"note"
+---@field key? string
+---@field entry? muster.Entry
+
+---@class muster.UiRender
+---@field lines string[]
+---@field extmarks muster.UiExtmark[]
+---@field virtual_text muster.UiVirtualText[]
+---@field row_by_line table<integer, muster.UiRow>
+---@field line_by_key table<string, integer>
+---@field anchors table<string, integer>
+---@field revision integer
+
+---@class muster.UiWindowOpenOpts
+---@field source_bufnr integer
+---@field ui muster.UiConfig
+---@field on_resize fun(window: muster.UiWindow)
+---@field on_error fun(err: any)
+
+---@class muster.UiWindow
+---@field source_bufnr integer
+---@field buf integer
+---@field win integer
+---@field backdrop_buf? integer
+---@field backdrop_win? integer
+---@field valid fun(self: muster.UiWindow): boolean
+---@field focus fun(self: muster.UiWindow)
+---@field content_width fun(self: muster.UiWindow): integer
+---@field cursor_line fun(self: muster.UiWindow): integer
+---@field draw fun(self: muster.UiWindow, output: muster.UiRender, selected_key?: string)
+---@field map fun(self: muster.UiWindow, lhs: string, callback: fun(), desc: string)
+---@field close fun(self: muster.UiWindow)
+
+---@class muster.UiHelpOpenOpts
+---@field parent_win integer
+---@field ui muster.UiConfig
+---@field output muster.UiRender
+---@field on_close fun()
+
+---@class muster.UiHelp
+---@field parent_win integer
+---@field ui muster.UiConfig
+---@field buf integer
+---@field win integer
+---@field valid fun(self: muster.UiHelp): boolean
+---@field focus fun(self: muster.UiHelp)
+---@field content_width fun(self: muster.UiHelp): integer
+---@field draw fun(self: muster.UiHelp, output: muster.UiRender)
+---@field resize fun(self: muster.UiHelp)
+---@field close fun(self: muster.UiHelp, notify?: boolean)
+
 ---@class muster.SetupOpts
 ---@field mason_install_fallback? boolean Permit automatic Mason installation fallback.
 ---@field notify_on_startup? boolean Emit the automatic summary when problems exist.
+---@field ui? muster.UiOpts
 ---@field lsp? muster.LspEntry[]
 ---@field conform? string[]
 ---@field nvim_lint? muster.NvimLintEntry[]
@@ -46,6 +257,7 @@
 ---@class muster.Config
 ---@field mason_install_fallback boolean
 ---@field notify_on_startup boolean
+---@field ui muster.UiConfig
 ---@field lsp? muster.LspEntry[]
 ---@field conform? string[]
 ---@field nvim_lint? muster.NvimLintEntry[]
