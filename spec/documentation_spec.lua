@@ -362,6 +362,7 @@ describe("public documentation", function()
 			"WARN on failure and INFO on success",
 			"Command-like text remains inert",
 			"never requires runner, automatic, report, enrich, Mason handoff",
+			"mason-lspconfig is not required",
 			"never installs, removes, updates, or reconfigures a package",
 		}
 		local highlights = {

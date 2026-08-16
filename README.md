@@ -432,7 +432,7 @@ The opted-in order is probe, registry refresh, enrichment, hand-off preparation,
 reporting, then install dispatch. Reporting completes before any install is
 dispatched. muster uses Mason's generic package installer; it does not call a
 mason-lspconfig install shortcut, run `:MasonInstall`, or directly enable an LSP
-server. LSP activation remains the user's or mason-lspconfig's policy.
+server. mason-lspconfig is not required; LSP activation remains the user's policy.
 
 Each dispatched package produces an INFO start notification. Terminal
 notifications and `:checkhealth muster` use the same result severity: only
