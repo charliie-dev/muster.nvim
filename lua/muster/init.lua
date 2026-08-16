@@ -9,11 +9,19 @@ local M = {}
 ---Configure muster. Configuration only: this runs no initialization logic, and
 ---`plugin/muster.lua` has already installed the command and the autocmd.
 ---
----Setup keys are adapter ids:
+---Setup keys are adapter ids. Dashboard options can be overridden selectively:
 ---```lua
 ---require("muster").setup({
----  lsp = { "lua_ls" }, conform = { "stylua" }, nvim_lint = { "selene" },
----  dap = { "codelldb" }, none_ls = { --[[ source objects ]] },
+---  lsp = { "lua_ls" },
+---  ui = {
+---    width = 0.8, height = 0.8, border = "rounded", backdrop = 60,
+---    icons = { found = "●", missing = "○" },
+---    labels = {
+---      title = "muster.nvim", no_matches = "No matching tools.",
+---      tabs = { active = "Active" },
+---    },
+---    keymaps = { close = { "q", "<Esc>" }, search = "/" },
+---  },
 ---})
 ---```
 ---@param opts? muster.SetupOpts

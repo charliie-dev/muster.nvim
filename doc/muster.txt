@@ -7,6 +7,7 @@ Table of Contents                                   *muster-table-of-contents*
   - Installation                             |muster-muster.nvim-installation|
   - Configuration                           |muster-muster.nvim-configuration|
   - Using muster                             |muster-muster.nvim-using-muster|
+  - Dashboard UI                             |muster-muster.nvim-dashboard-ui|
   - Installation authority         |muster-muster.nvim-installation-authority|
   - Known limits                             |muster-muster.nvim-known-limits|
   - Development                               |muster-muster.nvim-development|
@@ -356,6 +357,117 @@ is queried from every registered adapter that implements `live`, including all
 five built-ins, and can include undeclared tools. **EVERYTHING ELSE** contains
 declared tools that are not live there. The command re-probes on every opening,
 because formatter commands and other predicates can depend on the buffer.
+
+
+DASHBOARD UI                                 *muster-muster.nvim-dashboard-ui*
+
+Active shows tools live in the inspected buffer; All shows every collected
+tool. Issues includes non-found tools, unfiltered adapter diagnostics, report
+notes, and source-buffer errors. Its stable count includes each item exactly
+once. All tab counts come from the unfiltered collection. Rows become compact
+at narrow widths, while `<CR>` toggles expanded details. Collapsed rows show
+status, tool, type, and version; executable path and realpath are available in
+expanded details. Search is literal, normalized, and limited to 256 bytes. An
+active query with no matching tool shows `no_matches`; an issue-free Issues tab
+shows `no_issues`. The title and source context occupy two centered header
+rows; tabs and the footer are centered too. The dashboard footer shows only
+Search and Help, and an active query is never appended. Its exact default text
+is:
+
+>text
+    / Muster search:   ? Help
+<
+
+Help opens in a separate overlay sized to 80% of the dashboard width and
+height. It always installs and displays fixed `q/<Esc> close Help` controls,
+while full Help lists all enabled configured mappings and labels the configured
+close action `close dashboard`; disabling or remapping dashboard close does not
+change the fixed child controls. Help-only open/close preserves the selected
+tool, main revision, and main buffer without scheduling or drawing main, and
+close returns focus to the tool list. Refresh re-probes the canonical source
+buffer; refresh and version redraws update an open Help child at the current
+revision. Window resizing redraws the same singleton and re-centers Help at 80%
+of the resized parent; closing the parent or either Help resource cleans up the
+child, and closing and reopening creates a fresh dashboard.
+
+The complete defaults are executable configuration:
+
+>lua
+    -- muster-dashboard-ui-defaults
+    require("muster").setup({
+      ui = {
+        width = 0.8,
+        height = 0.8,
+        border = "rounded",
+        backdrop = 60,
+        icons = {
+          found = "●", missing = "○", unknown = "?", broken = "×", unverifiable = "!",
+          pending = "…", discovered = "*", expanded = "▾", collapsed = "▸",
+        },
+        labels = {
+          title = "muster.nvim",
+          tabs = { active = "Active", all = "All", issues = "Issues" },
+          adapters = { lsp = "LSP", conform = "Formatter", nvim_lint = "Linter", dap = "DAP", none_ls = "none-ls" },
+          columns = { status = "STATUS", tool = "TOOL", adapter = "TYPE", version = "VERSION" },
+          details = { source = "source", executable = "executable", path = "path", realpath = "realpath", reason = "reason", advice = "advice" },
+          empty = "No tools found.", no_matches = "No matching tools.", no_issues = "No issues found.",
+          search_prompt = "Muster search: ", help = "Help",
+        },
+        keymaps = {
+          close = { "q", "<Esc>" }, active = "1", all = "2", issues = "3",
+          next_tab = "<Tab>", previous_tab = "<S-Tab>", details = "<CR>",
+          search = "/", help = "?", refresh = "r", copy_path = "y",
+        },
+      },
+    })
+<
+
+Width and height must be positive finite numbers. Values in `(0, 1]` are
+ratios; values greater than 1 are fixed columns or lines. Backdrop must be an
+integer from 0 through 100. Border is a supported named border or exactly eight
+parts. Supported names are `none`, `single`, `double`, `rounded`, `solid`, and
+`shadow`. Each part is a character or a `{ character, highlight }` pair. Each
+border character is at most 16 bytes and at most one display cell, and follows
+the text control policy; highlight text is non-empty, printable, and at most
+128 bytes. Invalid UI configuration rejects the entire candidate and restores
+all defaults.
+
+Each action accepts a mapping string, a non-empty dense list of strings, or
+`false` to disable it. Thus `q` and `<Esc>` close by default and can be
+remapped or disabled explicitly. Raw mapping text is at most 64 bytes; its
+normalized `vim.keycode` result must be 1 to 50 bytes. Muster rejects semantic
+collisions after normalization. Configuration containers must be plain, acyclic
+tables, and list forms must be dense lists. Labels allow 128 bytes, icons 32
+bytes, border characters 16 bytes, and highlight names 128 bytes. User-facing
+text rejects C0, DEL, C1, U+061C, U+200E, U+200F, U+202A-U+202E, and
+U+2066-U+2069 controls. Adapter keys are the exception: they permit C1 and bidi
+characters for third-party ids, but still reject C0 and DEL.
+
+The preferred copy path is `probe.path`; `probe.realpath` is the fallback only
+when path is absent. The selected copy value must be a non-empty string of at
+most 4096 bytes. Copy rejects exactly C0, DEL, C1, U+061C, U+200E, U+200F,
+U+202A-U+202E, and U+2066-U+2069 controls. Arbitrary other bytes and
+command-like text remain inert. The inert register allowlist is `"`, `a-z`,
+`A-Z`, `0-9`, `+`, `*`, `-`, and `_`. Special registers outside that allowlist
+are rejected. A path of 4096 bytes is accepted and 4097 bytes is rejected;
+stale render revisions refuse to copy. Only numeric zero from `setreg` means
+success. Rejected copy inputs never call `setreg`; throws and nonzero, false,
+or nil returns never report success. Copy reports WARN on failure and INFO on
+success. Command-like text remains inert and is never executed.
+
+Default highlight links are:
+
+- `MusterNormal -> NormalFloat`; `MusterBackdrop -> Normal`; `MusterHeader -> Title`.
+- `MusterTabActive -> Visual`; `MusterTabInactive -> Comment`.
+- `MusterStatusFound -> DiagnosticOk`; `MusterStatusMissing -> DiagnosticWarn`;
+    `MusterStatusBroken -> DiagnosticError`; `MusterStatusUnknown -> DiagnosticWarn`;
+    `MusterStatusUnverifiable -> DiagnosticInfo`.
+- `MusterAdapter -> Type`; `MusterVersion -> String`; `MusterMuted -> Comment`;
+    `MusterDetailKey -> Identifier`; `MusterSearchMatch -> IncSearch`.
+
+Dashboard inspection never requires runner, automatic, report, enrich, Mason
+handoff, or any provider handoff. It never installs, removes, updates, or
+reconfigures a package.
 
 
 INSTALLATION AUTHORITY             *muster-muster.nvim-installation-authority*
